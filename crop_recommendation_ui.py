@@ -52,10 +52,10 @@ with col1:
     N = st.number_input("Nitratgehalt im Boden (N)", value=50, min_value=0, max_value=140, step=1, help="Wert zwischen 0 und 140 kg/ha eingeben")
     P = st.number_input("Phosphorgehalt im Boden (P)", value=50, min_value=5, max_value=145, step=1, help="Wert zwischen 5 und 145 kg/ha eingeben")
     K = st.number_input("Kaliumgehalt im Boden (K)", value=50, min_value=5, max_value=205, step=1, help="Wert zwischen 5 und 205 kg/ha eingeben")
-    temperature = st.number_input("Temperatur (°C)", value=25.0, min_value=0.0, max_value=43.0, step=1.0, help="Wert zwischen 0 und 43 Grad Celsius eingeben")
-    humidity = st.number_input("Luftfeuchtigkeit (%)", value=60.0, min_value=14.0, max_value=100.0, step=1.0, help="Wert zwischen 14 und 100 Prozent eingeben")
-    ph = st.number_input("pH-Wert", value=6.5, min_value=3.5, max_value=9.5, step=1.0, help="Wert zwischen 3.5 und 9.5 eingeben")
-    rainfall = st.number_input("Niederschlag (mm)", value=100.0, min_value=20.0, max_value=300.0, step=1.0, help="Wert zwischen 20 und 300 mm eingeben")
+    temperature = st.number_input("Temperatur (°C)", value=25.0, min_value=0.0, max_value=43.0, step=0.1, help="Wert zwischen 0 und 43 Grad Celsius eingeben")
+    humidity = st.number_input("Luftfeuchtigkeit (%)", value=60.0, min_value=14.0, max_value=100.0, step=0.1, help="Wert zwischen 14 und 100 Prozent eingeben")
+    ph = st.number_input("pH-Wert", value=6.5, min_value=3.5, max_value=9.5, step=0.1, help="Wert zwischen 3.5 und 9.5 eingeben")
+    rainfall = st.number_input("Niederschlag (mm)", value=100.0, min_value=20.0, max_value=300.0, step=0.1, help="Wert zwischen 20 und 300 mm eingeben")
 
     
     # Wenn der Benutzer auf den Button klickt, wird die Vorhersage gestartet
