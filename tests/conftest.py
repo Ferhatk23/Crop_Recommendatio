@@ -58,3 +58,30 @@ def buy(ticket, position_id, volume, price, minute, **kw) -> Deal:
 def sell(ticket, position_id, volume, price, minute, **kw) -> Deal:
     entry = kw.pop("entry", DealEntry.OUT)
     return deal(ticket, position_id, DealType.SELL, entry, volume, price, minute, **kw)
+
+
+# Benannte Helfer statt roher buy/sell.
+#
+# Der Grund: Ob eine Ausführung öffnet oder schließt, hängt nicht an Kauf
+# oder Verkauf -- ein Short wird mit einem *Verkauf* eröffnet. Wer das in
+# den Testdaten verwechselt, baut MT5-Historie, die es so nie gäbe, und
+# prüft damit am Ende das Falsche.
+
+def open_long(ticket, position_id, volume, price, minute, **kw) -> Deal:
+    return buy(ticket, position_id, volume, price, minute, entry=DealEntry.IN, **kw)
+
+
+def add_long(ticket, position_id, volume, price, minute, **kw) -> Deal:
+    return buy(ticket, position_id, volume, price, minute, entry=DealEntry.IN, **kw)
+
+
+def close_long(ticket, position_id, volume, price, minute, **kw) -> Deal:
+    return sell(ticket, position_id, volume, price, minute, entry=DealEntry.OUT, **kw)
+
+
+def open_short(ticket, position_id, volume, price, minute, **kw) -> Deal:
+    return sell(ticket, position_id, volume, price, minute, entry=DealEntry.IN, **kw)
+
+
+def close_short(ticket, position_id, volume, price, minute, **kw) -> Deal:
+    return buy(ticket, position_id, volume, price, minute, entry=DealEntry.OUT, **kw)

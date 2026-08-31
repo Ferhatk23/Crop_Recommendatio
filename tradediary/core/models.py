@@ -133,10 +133,26 @@ class Trade:
     direction: Direction
     opened_at: datetime
     volume: Decimal
-    avg_entry: Decimal
+    #: `None`, wenn die Eröffnung vor dem abgefragten Zeitraum lag. Eine
+    #: Null stünde da wie ein Preis, und niemand könnte den Unterschied
+    #: sehen.
+    avg_entry: Decimal | None
 
     closed_at: datetime | None = None
     avg_exit: Decimal | None = None
+
+    #: Wie viel bereits wieder glattgestellt wurde. Bei einem geschlossenen
+    #: Trade gleich dem Volumen; bei einem offenen der Teil, aus dem schon
+    #: ausgestiegen wurde. Ein offener Trade mit Teilausstiegen trägt sehr
+    #: wohl realisiertes Ergebnis -- ohne diese Angabe sähe das aus wie ein
+    #: Fehler.
+    exit_volume: Decimal = ZERO
+
+    #: Bruchstück: Das Ergebnis stimmt, aber Einstiegspreis und -volumen
+    #: fehlen, weil die Eröffnung außerhalb des Zeitraums lag. Am Rand jedes
+    #: Abfragefensters unvermeidlich -- die Oberfläche soll es kennzeichnen
+    #: statt so zu tun, als wären die Daten vollständig.
+    partial: bool = False
 
     gross_pnl: Decimal = ZERO
     costs: Decimal = ZERO

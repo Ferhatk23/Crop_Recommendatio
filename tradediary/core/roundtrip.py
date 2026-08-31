@@ -21,9 +21,69 @@ from __future__ import annotations
 from collections import defaultdict
 from dataclasses import dataclass, field
 from datetime import datetime
-from decimal import Decimal
+from decimal import ROUND_HALF_UP, Decimal
 
-from .models import ZERO, BalanceEntry, Deal, DealType, Direction, Trade
+from .models import ZERO, BalanceEntry, Deal, DealEntry, DealType, Direction, Trade
+
+CENT = Decimal("0.01")
+
+
+def _distribute(amount: Decimal, weights: list[Decimal]) -> list[Decimal]:
+    """Verteilt einen Betrag anteilig, ohne dass Cent verloren gehen.
+
+    Die ersten Anteile werden gerundet, der letzte bekommt den Rest. Damit
+    ist die Summe der Anteile *exakt* der Ausgangsbetrag -- über tausende
+    Trades ist das der Unterschied zwischen einer Netto-Summe, die dem
+    Kontoauszug entspricht, und einer, die um ein paar Euro danebenliegt.
+    """
+    if not weights:
+        return []
+    total = sum(weights, ZERO)
+    if total == ZERO or amount == ZERO:
+        return [ZERO] * len(weights)
+
+    # Der Rest geht an den letzten Anteil *mit Gewicht*. Ginge er stumpf an
+    # den letzten überhaupt, bekäme ein Teil mit Gewicht null trotzdem Geld.
+    last = max(i for i, weight in enumerate(weights) if weight != ZERO)
+
+    parts = [ZERO] * len(weights)
+    verteilt = ZERO
+    for index, weight in enumerate(weights):
+        if index == last or weight == ZERO:
+            continue
+        part = (amount * weight / total).quantize(CENT, rounding=ROUND_HALF_UP)
+        parts[index] = part
+        verteilt += part
+    parts[last] = amount - verteilt
+    return parts
+
+
+def _split_plan(position: Decimal, signed_volume: Decimal) -> list[Decimal]:
+    """Zerlegt eine Ausführung in die Teile, die je einen Trade betreffen.
+
+    Im Normalfall ist das genau ein Teil. Bei einer Umkehr sind es zwei: der
+    Teil, der die alte Position auf null bringt, und der Rest, der die neue
+    eröffnet.
+    """
+    takes: list[Decimal] = []
+    remaining = signed_volume
+    pos = position
+
+    while remaining != ZERO:
+        if pos == ZERO or (pos > ZERO) == (remaining > ZERO):
+            # Eröffnen oder aufstocken -- alles auf einmal.
+            take = remaining
+        elif abs(remaining) <= abs(pos):
+            # Gegenrichtung, aber nicht mehr als offen ist.
+            take = remaining
+        else:
+            # Umkehr: nur so viel, wie die Position auf null bringt.
+            take = -pos
+        takes.append(take)
+        pos += take
+        remaining -= take
+
+    return takes
 
 
 def split_balance_entries(deals: list[Deal]) -> tuple[list[Deal], list[BalanceEntry]]:
@@ -85,21 +145,25 @@ class _Builder:
         self.closed_at = when
 
     def build(self, closed: bool) -> Trade:
-        avg_entry = (
-            self.entry_notional / self.entry_volume if self.entry_volume else ZERO
-        )
-        avg_exit = (
-            self.exit_notional / self.exit_volume if self.exit_volume else None
-        )
+        # Ohne Eröffnung im Zeitraum kennen wir Einstiegspreis und -volumen
+        # nicht. Dann steht dort `None` statt einer Null, die wie ein Preis
+        # aussähe -- und das Volumen kommt aus dem Ausstieg, denn das ist
+        # bekannt. Das Ergebnis des Trades stimmt in beiden Fällen.
+        vollstaendig = self.entry_volume > ZERO
+        avg_entry = self.entry_notional / self.entry_volume if vollstaendig else None
+        avg_exit = self.exit_notional / self.exit_volume if self.exit_volume else None
+
         return Trade(
             account_id=self.account_id,
             symbol=self.symbol,
             direction=self.direction,
-            opened_at=self.opened_at,
+            opened_at=self.opened_at or self.closed_at,
             closed_at=self.closed_at if closed else None,
-            volume=self.entry_volume,
+            volume=self.entry_volume if vollstaendig else self.exit_volume,
             avg_entry=avg_entry,
             avg_exit=avg_exit if closed else None,
+            exit_volume=self.exit_volume,
+            partial=not vollstaendig,
             gross_pnl=self.gross_pnl,
             costs=self.costs,
             position_id=self.position_id,
@@ -126,10 +190,24 @@ def trades_from_positions(deals: list[Deal]) -> list[Trade]:
         group.sort(key=Deal.sort_key)
         first = group[0]
 
-        # Die Richtung ergibt sich aus der ersten Ausführung: Wer kauft, um
-        # zu eröffnen, ist long.
-        direction = Direction.LONG if first.type is DealType.BUY else Direction.SHORT
-        opening_type = first.type
+        # Die Richtung ergibt sich aus der ersten *eröffnenden* Ausführung.
+        # Nicht aus group[0]: Fängt der abgefragte Zeitraum mitten in einer
+        # Position an, ist die erste vorliegende Ausführung ein Ausstieg --
+        # und die Richtung wäre genau verkehrt herum.
+        opener = next((d for d in group if d.entry is DealEntry.IN), None)
+        if opener is not None:
+            direction = (
+                Direction.LONG if opener.type is DealType.BUY else Direction.SHORT
+            )
+            opening_type = opener.type
+        else:
+            # Bruchstück: Die Eröffnung liegt vor dem abgefragten Zeitraum.
+            # Am Rand jedes Abfragefensters unvermeidlich. Die Richtung ist
+            # dann die *Gegenrichtung* der schließenden Ausführung -- wer mit
+            # einem Kauf schließt, war short.
+            schliesst_mit_kauf = first.type is DealType.BUY
+            direction = Direction.SHORT if schliesst_mit_kauf else Direction.LONG
+            opening_type = DealType.SELL if schliesst_mit_kauf else DealType.BUY
 
         builder = _Builder(
             account_id=account_id,
@@ -145,7 +223,18 @@ def trades_from_positions(deals: list[Deal]) -> list[Trade]:
             if deal.stop_loss is not None and builder.initial_sl is None:
                 builder.initial_sl = deal.stop_loss
 
-            if deal.type is opening_type:
+            # Das `entry`-Feld ist die verlässlichere Auskunft: Es sagt
+            # ausdrücklich, ob eine Ausführung öffnet oder schließt. Der
+            # Vergleich der Kauf-/Verkaufsrichtung ist nur der Rückfallweg
+            # für Quellen, die das Feld nicht mitliefern.
+            if deal.entry is DealEntry.IN:
+                is_entry = True
+            elif deal.entry in (DealEntry.OUT, DealEntry.OUT_BY):
+                is_entry = False
+            else:
+                is_entry = deal.type is opening_type
+
+            if is_entry:
                 builder.add_entry(deal.volume, deal.price, deal.time_utc)
             else:
                 builder.add_exit(deal.volume, deal.price, deal.time_utc)
@@ -189,49 +278,63 @@ def trades_from_executions(deals: list[Deal]) -> list[Trade]:
         builder: _Builder | None = None
 
         for deal in group:
-            remaining = deal.signed_volume
-            if remaining == ZERO:
+            if deal.signed_volume == ZERO:
                 continue
-            total = abs(remaining)
 
-            while remaining != ZERO:
+            takes = _split_plan(position, deal.signed_volume)
+
+            # Vorab feststellen, welche Teile schließen und welche öffnen --
+            # davon hängt ab, wem das Ergebnis gehört.
+            closing_flags: list[bool] = []
+            lookahead = position
+            for take in takes:
+                closing_flags.append(
+                    lookahead != ZERO and (lookahead > ZERO) != (take > ZERO)
+                )
+                lookahead += take
+
+            volumes = [abs(take) for take in takes]
+            closing_volumes = [
+                volume if closing else ZERO
+                for volume, closing in zip(volumes, closing_flags)
+            ]
+
+            # Realisiertes Ergebnis und Swap gehören dem schließenden Teil.
+            # MT5 bucht beides auf die schließende Ausführung; ein neu
+            # eröffneter Trade hat noch nichts realisiert. Anteilig zu
+            # verteilen hieße, ihm einen Gewinn zuzuschreiben, den er nicht
+            # gemacht hat -- und beide Trades falsch auszuweisen.
+            weights = closing_volumes if any(closing_flags) else volumes
+            profits = _distribute(deal.profit, weights)
+            swaps = _distribute(deal.swap, weights)
+            # Kommission und Gebühren fallen je Volumen an, also auf alles.
+            charges = _distribute(deal.commission + deal.fee, volumes)
+
+            for take, closing, profit, swap, charge in zip(
+                takes, closing_flags, profits, swaps, charges
+            ):
                 if position == ZERO:
                     # Neue Position -- ein neuer Trade beginnt.
                     builder = _Builder(
                         account_id=account_id,
                         symbol=symbol,
-                        direction=(
-                            Direction.LONG if remaining > ZERO else Direction.SHORT
-                        ),
+                        direction=Direction.LONG if take > ZERO else Direction.SHORT,
                     )
-                    take = remaining
-                elif (position > ZERO) == (remaining > ZERO):
-                    # Gleiche Richtung: aufgestockt.
-                    take = remaining
-                elif abs(remaining) <= abs(position):
-                    # Gegenrichtung, aber nicht mehr als offen ist: Teilausstieg.
-                    take = remaining
-                else:
-                    # Umkehr: nur der Teil, der die Position auf null bringt.
-                    take = -position
 
                 assert builder is not None
-                share = abs(take) / total
-                builder.gross_pnl += deal.profit * share
-                builder.costs += deal.costs * share
+                builder.gross_pnl += profit
+                builder.costs += swap + charge
                 if deal.ticket not in builder.tickets:
                     builder.tickets.append(deal.ticket)
                 if deal.stop_loss is not None and builder.initial_sl is None:
                     builder.initial_sl = deal.stop_loss
 
-                opening = position == ZERO or (position > ZERO) == (take > ZERO)
-                if opening:
-                    builder.add_entry(abs(take), deal.price, deal.time_utc)
-                else:
+                if closing:
                     builder.add_exit(abs(take), deal.price, deal.time_utc)
+                else:
+                    builder.add_entry(abs(take), deal.price, deal.time_utc)
 
                 position += take
-                remaining -= take
 
                 if position == ZERO:
                     trades.append(builder.build(closed=True))
@@ -280,7 +383,7 @@ def apply_risk(
     die Symbolangaben des Brokers hat. Deshalb wird der Geldwert je Punkt
     hier hereingereicht statt geraten.
     """
-    if trade.initial_sl is None or trade.avg_entry == ZERO:
+    if trade.initial_sl is None or not trade.avg_entry:
         return trade
     distance = abs(trade.avg_entry - trade.initial_sl)
     trade.risk_amount = distance * points_per_unit * point_value * trade.volume
