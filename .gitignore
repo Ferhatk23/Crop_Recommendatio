@@ -4,4 +4,24 @@ __pycache__/
 *.egg-info/
 .venv/
 venv/
+
+# Zugangsdaten. Gehören niemals ins Verzeichnis -- weder Kontonummer
+# noch Investor-Passwort, auch nicht "nur zum Testen".
 .env
+.env.*
+!.env.beispiel
+
+# Der Datenbestand ist erzeugt, nicht gepflegt: `python scripts/seed_db.py`
+# baut ihn jederzeit neu. Eingecheckt würde er nur veralten -- und im
+# Echtbetrieb stünden hier die Handelsdaten eines echten Kontos.
+*.db
+*.db-journal
+*.db-wal
+*.db-shm
+
+# Web
+node_modules/
+.next/
+out/
+*.tsbuildinfo
+.DS_Store

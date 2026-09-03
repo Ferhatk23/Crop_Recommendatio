@@ -1,0 +1,307 @@
+"""Zwischen Datenbankzeilen und den Dataclasses des Kerns übersetzen.
+
+Der Kern rechnet auf `Decimal` und kennt keine Datenbank. Die Datenbank
+kennt keine Geschäftslogik. Diese Datei ist die einzige Stelle, an der
+beide sich begegnen -- und damit auch die einzige, die man anfassen muss,
+wenn eine von beiden Seiten sich ändert.
+"""
+
+from __future__ import annotations
+
+from datetime import datetime, timezone
+from decimal import Decimal
+
+from sqlalchemy import create_engine, delete, select
+from sqlalchemy.orm import Session, sessionmaker
+
+from ..core import instruments, metrics as kern_metrics
+from ..core.models import ZERO, Deal, DealEntry, DealType, Direction
+from ..core.models import Trade as KernTrade
+from ..core.roundtrip import trades_from_executions, trades_from_positions
+from . import models as db
+
+
+def engine_bauen(url: str = "sqlite:///tradediary.db"):
+    """Erzeugt die Engine. SQLite in der Entwicklung, Postgres im Betrieb."""
+    kwargs = {"future": True}
+    if url.startswith("sqlite"):
+        kwargs["connect_args"] = {"check_same_thread": False}
+    return create_engine(url, **kwargs)
+
+
+def schema_anlegen(engine) -> None:
+    db.Base.metadata.create_all(engine)
+
+
+def session_factory(engine) -> sessionmaker[Session]:
+    return sessionmaker(bind=engine, expire_on_commit=False, future=True)
+
+
+# ---------------------------------------------------------------------------
+# Umwandlung
+# ---------------------------------------------------------------------------
+
+def _dec(wert) -> Decimal:
+    """DB-Zahl zu Decimal. SQLite gibt je nach Typ float zurück."""
+    if wert is None:
+        return ZERO
+    if isinstance(wert, Decimal):
+        return wert
+    return Decimal(str(wert))
+
+
+def _utc(zeit: datetime | None) -> datetime | None:
+    """Stellt sicher, dass eine Zeit zeitzonenbehaftet ist.
+
+    SQLite gibt naive datetimes zurück, auch wenn sie mit Zeitzone
+    gespeichert wurden. Ein Vergleich zwischen naiv und bewusst wirft --
+    und zwar erst beim Sortieren, weit weg von der Ursache.
+    """
+    if zeit is None:
+        return None
+    return zeit if zeit.tzinfo else zeit.replace(tzinfo=timezone.utc)
+
+
+def deal_zu_kern(zeile: db.Deal) -> Deal:
+    return Deal(
+        ticket=zeile.ticket,
+        account_id=str(zeile.account_id),
+        position_id=zeile.position_id,
+        symbol=zeile.symbol,
+        type=DealType(zeile.type),
+        entry=DealEntry(zeile.entry),
+        volume=_dec(zeile.volume),
+        price=_dec(zeile.price),
+        time_utc=_utc(zeile.time_utc),
+        profit=_dec(zeile.profit),
+        commission=_dec(zeile.commission),
+        swap=_dec(zeile.swap),
+        fee=_dec(zeile.fee),
+        time_broker=zeile.time_broker,
+        stop_loss=_dec(zeile.stop_loss) if zeile.stop_loss is not None else None,
+    )
+
+
+def trade_zu_kern(zeile: db.Trade) -> KernTrade:
+    t = KernTrade(
+        account_id=str(zeile.account_id),
+        symbol=zeile.symbol,
+        direction=Direction(zeile.direction),
+        opened_at=_utc(zeile.opened_at),
+        volume=_dec(zeile.volume),
+        avg_entry=_dec(zeile.avg_entry) if zeile.avg_entry is not None else None,
+        closed_at=_utc(zeile.closed_at),
+        avg_exit=_dec(zeile.avg_exit) if zeile.avg_exit is not None else None,
+        exit_volume=_dec(zeile.exit_volume),
+        gross_pnl=_dec(zeile.gross_pnl),
+        costs=_dec(zeile.costs),
+        position_id=zeile.position_id,
+        partial=zeile.partial,
+        initial_sl=_dec(zeile.initial_sl) if zeile.initial_sl is not None else None,
+    )
+    if zeile.risk_amount is not None:
+        t.risk_amount = _dec(zeile.risk_amount)
+    return t
+
+
+# ---------------------------------------------------------------------------
+# Aufnahme
+# ---------------------------------------------------------------------------
+
+def deals_speichern(session: Session, account_id: int, deals: list[Deal]) -> int:
+    """Speichert Ausführungen und weist bereits bekannte still ab.
+
+    Genau das macht den wiederholten Abgleich desselben Zeitraums
+    ungefährlich -- und damit die ganze Kette ausfallsicher: Verpasst der
+    Sammler einen Lauf, holt der nächste alles nach, ohne dass etwas
+    doppelt gezählt wird.
+    """
+    if not deals:
+        return 0
+
+    bekannt = set(
+        session.scalars(
+            select(db.Deal.ticket).where(db.Deal.account_id == account_id)
+        ).all()
+    )
+
+    neu = 0
+    for d in deals:
+        if d.ticket in bekannt:
+            continue
+        bekannt.add(d.ticket)
+        session.add(
+            db.Deal(
+                ticket=d.ticket,
+                account_id=account_id,
+                position_id=d.position_id,
+                symbol=d.symbol,
+                type=d.type.value,
+                entry=d.entry.value,
+                volume=d.volume,
+                price=d.price,
+                time_utc=d.time_utc,
+                time_broker=d.time_broker,
+                profit=d.profit,
+                commission=d.commission,
+                swap=d.swap,
+                fee=d.fee,
+                stop_loss=d.stop_loss,
+            )
+        )
+        neu += 1
+
+    session.commit()
+    return neu
+
+
+def trades_neu_berechnen(session: Session, account_id: int) -> int:
+    """Baut die Trades des Kontos aus den Deals neu auf.
+
+    Bewusst vollständig statt inkrementell: Die Deals sind die Wahrheit,
+    die Trades nur ihr Abbild. Ein Neuaufbau ist billig und kann nicht in
+    einen halben Zustand geraten -- und er ist der Weg, auf dem eine
+    korrigierte Zuordnungslogik rückwirkend greift.
+    """
+    zeilen = session.scalars(
+        select(db.Deal).where(db.Deal.account_id == account_id)
+    ).all()
+    if not zeilen:
+        return 0
+
+    deals = [deal_zu_kern(z) for z in zeilen]
+
+    # Notizen, Tags und Playbook-Zuordnung hängen am Trade und dürfen einen
+    # Neuaufbau überleben. Sie werden über die position_id wiedergefunden.
+    bewahrt = {
+        t.position_id: (t.note, t.playbook_id)
+        for t in session.scalars(
+            select(db.Trade).where(db.Trade.account_id == account_id)
+        ).all()
+    }
+
+    session.execute(delete(db.Trade).where(db.Trade.account_id == account_id))
+
+    # Über die position_id des Brokers, wenn sie etwas hergibt -- sonst über
+    # die Ausführungsreihenfolge.
+    hat_positionen = len({d.position_id for d in deals}) > 1
+    trades = (
+        trades_from_positions(deals) if hat_positionen else trades_from_executions(deals)
+    )
+
+    for t in trades:
+        note, playbook_id = bewahrt.get(t.position_id, (None, None))
+        # Das R-Multiple ist die einzige Größe, die der Broker nicht
+        # mitliefert -- der Trade ist ja nie am Stop gelandet. Sie wird
+        # hier aus Stop-Abstand und Kontraktwert gebildet; fehlt eine der
+        # Angaben, bleibt sie None statt geraten zu werden.
+        if t.risk_amount is None:
+            t.risk_amount = instruments.risiko(
+                t.symbol, t.avg_entry, t.initial_sl, t.volume
+            )
+        session.add(
+            db.Trade(
+                account_id=account_id,
+                position_id=t.position_id or 0,
+                symbol=t.symbol,
+                direction=t.direction.value,
+                opened_at=t.opened_at,
+                closed_at=t.closed_at,
+                volume=t.volume,
+                exit_volume=t.exit_volume,
+                avg_entry=t.avg_entry,
+                avg_exit=t.avg_exit,
+                gross_pnl=t.gross_pnl,
+                costs=t.costs,
+                net_pnl=t.net_pnl,
+                initial_sl=t.initial_sl,
+                risk_amount=t.risk_amount,
+                r_multiple=t.r_multiple,
+                partial=t.partial,
+                note=note,
+                playbook_id=playbook_id,
+            )
+        )
+
+    session.commit()
+    return len(trades)
+
+
+def sync_vermerken(
+    session: Session,
+    account_id: int,
+    source: str,
+    neue_deals: int,
+    fehler: str | None = None,
+) -> None:
+    """Schreibt den Herzschlag fort."""
+    zustand = session.get(db.SyncState, account_id)
+    if zustand is None:
+        zustand = db.SyncState(account_id=account_id)
+        session.add(zustand)
+
+    jetzt = datetime.now(timezone.utc)
+    zustand.source = source
+    zustand.last_run_at = jetzt
+    zustand.last_error = fehler
+    if fehler is None:
+        zustand.last_success_at = jetzt
+        zustand.deals_imported = (zustand.deals_imported or 0) + neue_deals
+        letzte = session.scalar(
+            select(db.Deal.time_utc)
+            .where(db.Deal.account_id == account_id)
+            .order_by(db.Deal.time_utc.desc())
+            .limit(1)
+        )
+        if letzte is not None:
+            zustand.last_deal_time = _utc(letzte)
+
+    session.commit()
+
+
+def aufnehmen(
+    session: Session, account_id: int, deals: list[Deal], source: str = "csv"
+) -> tuple[int, int]:
+    """Der ganze Weg: speichern, neu zuordnen, Herzschlag setzen."""
+    try:
+        neu = deals_speichern(session, account_id, deals)
+        anzahl = trades_neu_berechnen(session, account_id)
+        sync_vermerken(session, account_id, source, neu)
+        return neu, anzahl
+    except Exception as fehler:  # noqa: BLE001 -- Fehler gehört in den Herzschlag
+        session.rollback()
+        sync_vermerken(session, account_id, source, 0, str(fehler))
+        raise
+
+
+# ---------------------------------------------------------------------------
+# Abfragen
+# ---------------------------------------------------------------------------
+
+def trades_laden(
+    session: Session,
+    account_id: int | None = None,
+    von: datetime | None = None,
+    bis: datetime | None = None,
+    symbol: str | None = None,
+    direction: str | None = None,
+) -> list[KernTrade]:
+    frage = select(db.Trade)
+    if account_id is not None:
+        frage = frage.where(db.Trade.account_id == account_id)
+    if von is not None:
+        frage = frage.where(db.Trade.opened_at >= von)
+    if bis is not None:
+        frage = frage.where(db.Trade.opened_at <= bis)
+    if symbol:
+        frage = frage.where(db.Trade.symbol == symbol)
+    if direction:
+        frage = frage.where(db.Trade.direction == direction)
+
+    frage = frage.order_by(db.Trade.opened_at.desc())
+    return [trade_zu_kern(z) for z in session.scalars(frage).all()]
+
+
+def kennzahlen(session: Session, **filter) -> kern_metrics.Metrics:
+    """Kennzahlen über die gefilterten Trades -- gerechnet vom Kern."""
+    return kern_metrics.compute(trades_laden(session, **filter))
