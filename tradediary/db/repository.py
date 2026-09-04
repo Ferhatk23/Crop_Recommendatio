@@ -171,9 +171,10 @@ def trades_neu_berechnen(session: Session, account_id: int) -> int:
 
     deals = [deal_zu_kern(z) for z in zeilen]
 
-    # Notizen, Tags und Playbook-Zuordnung hängen am Trade und dürfen einen
-    # Neuaufbau überleben. Sie werden über die position_id wiedergefunden --
-    # die ist die einzige Größe, die ein Neuaufbau unverändert lässt.
+    # Notizen, Tags, Playbook-Zuordnung und Regel-Antworten hängen am Trade
+    # und dürfen einen Neuaufbau überleben. Sie werden über die position_id
+    # wiedergefunden -- die ist die einzige Größe, die ein Neuaufbau
+    # unverändert lässt.
     #
     # Die Tag-Verknüpfungen müssen dabei ausdrücklich mitgeführt werden.
     # `Trade.tags` trägt zwar `cascade="all, delete-orphan"`, aber das ist
@@ -194,11 +195,22 @@ def trades_neu_berechnen(session: Session, account_id: int) -> int:
     bewahrte_tags = {
         t.position_id: [tt.tag_id for tt in t.tags] for t in alte if t.tags
     }
+    # Dieselbe Falle wie bei den Tags, und aus demselben Grund ausdrücklich:
+    # Die Regel-Antworten sind von Hand gesetzt und stehen nirgends sonst.
+    bewahrte_regeln = {
+        t.position_id: [(c.rule_id, c.checked) for c in t.rule_checks]
+        for t in alte
+        if t.rule_checks
+    }
 
     if alte:
+        alte_ids = [t.id for t in alte]
         session.execute(
-            delete(db.TradeTag).where(
-                db.TradeTag.trade_id.in_([t.id for t in alte])
+            delete(db.TradeTag).where(db.TradeTag.trade_id.in_(alte_ids))
+        )
+        session.execute(
+            delete(db.TradeRuleCheck).where(
+                db.TradeRuleCheck.trade_id.in_(alte_ids)
             )
         )
     session.execute(delete(db.Trade).where(db.Trade.account_id == account_id))
@@ -251,6 +263,12 @@ def trades_neu_berechnen(session: Session, account_id: int) -> int:
     for position_id, zeile in neue:
         for tag_id in bewahrte_tags.get(position_id, ()):
             session.add(db.TradeTag(trade_id=zeile.id, tag_id=tag_id))
+        for rule_id, gehalten in bewahrte_regeln.get(position_id, ()):
+            session.add(
+                db.TradeRuleCheck(
+                    trade_id=zeile.id, rule_id=rule_id, checked=gehalten
+                )
+            )
 
     session.commit()
     return len(trades)

@@ -28,6 +28,12 @@ const PUNKTE = [
   { href: '/reports', label: 'Reports', icon: '◪' },
 ];
 
+/** Was man einrichtet, nicht was man täglich benutzt. */
+const NEBENPUNKTE = [
+  { href: '/playbooks', label: '◫ Playbooks' },
+  { href: '/einstellungen', label: '⚙ Einstellungen' },
+];
+
 function NavLinks({ symbole }: { symbole?: boolean }) {
   const pfad = usePathname();
   return (
@@ -293,27 +299,28 @@ export function Shell({ children }: { children: React.ReactNode }) {
           >
             {theme === 'dark' ? '☀ Hell' : '☾ Dunkel'}
           </button>
-          {/* Einstellungen gehören nicht in die Hauptnavigation: Man geht
-              einmal hin, trägt sein Konto ein, und kommt danach selten
-              wieder. In der Tab-Leiste unten nähme das den Platz eines
-              Bildschirms weg, den man täglich braucht. */}
-          <Link
-            href="/einstellungen"
-            aria-current={pfad === '/einstellungen' ? 'page' : undefined}
-            className="td-tap"
-            style={{
-              display: 'block',
-              fontSize: 11,
-              color:
-                pfad === '/einstellungen'
-                  ? 'var(--td-text)'
-                  : 'var(--td-neutral)',
-              fontWeight: pfad === '/einstellungen' ? 600 : 400,
-              borderTop: '1px solid var(--td-line)',
-            }}
-          >
-            ⚙ Einstellungen
-          </Link>
+          {/* Playbooks und Einstellungen gehören nicht in die
+              Hauptnavigation: Man geht hin, wenn man etwas einrichtet, und
+              kommt danach selten wieder. In der Tab-Leiste unten nähmen
+              sie den Platz eines Bildschirms weg, den man täglich braucht.
+              Abgehakt wird am Trade, nicht hier. */}
+          {NEBENPUNKTE.map((p) => (
+            <Link
+              key={p.href}
+              href={p.href}
+              aria-current={pfad === p.href ? 'page' : undefined}
+              className="td-tap"
+              style={{
+                display: 'block',
+                fontSize: 11,
+                color: pfad === p.href ? 'var(--td-text)' : 'var(--td-neutral)',
+                fontWeight: pfad === p.href ? 600 : 400,
+                borderTop: '1px solid var(--td-line)',
+              }}
+            >
+              {p.label}
+            </Link>
+          ))}
           <button
             onClick={() => void abmelden()}
             className="td-tap nur-breit"

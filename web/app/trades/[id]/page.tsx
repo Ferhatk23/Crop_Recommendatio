@@ -15,7 +15,7 @@ import { use, useEffect, useState } from 'react';
 import Link from 'next/link';
 import { useApp, useDaten } from '../../../components/AppState';
 import { PageHead } from '../../../components/Shell';
-import { NotizFeld, TagFeld } from '../../../components/Schreiben';
+import { NotizFeld, PlaybookFeld, TagFeld } from '../../../components/Schreiben';
 import { DirectionPill, EmptyState } from '../../../components/primitives';
 import { api, type Execution, type TradeDetail as TradeDetailDaten } from '../../../lib/api';
 import { outcome } from '../../../lib/outcome';
@@ -199,6 +199,7 @@ export default function TradeDetail({
   const { accountId } = useApp();
   const trade = useDaten(() => api.trade(Number(id)), [id]);
   const vorschlaege = useDaten(() => api.tags(accountId), [accountId]);
+  const buecher = useDaten(() => api.playbooks(), []);
 
   // Der Trade wird nach dem Laden lokal gehalten, weil die
   // Schreib-Endpunkte den vollständigen Trade zurückgeben. Ein erneutes
@@ -435,6 +436,23 @@ export default function TradeDetail({
             const neu = await api.tags_setzen(t.id, liste);
             // Die geänderten Felder auf den bekannten Trade legen. Die
             // Ausführungen bleiben, wo sie sind -- Schreiben ändert sie nicht.
+            setT((alt) => (alt ? { ...alt, ...neu } : alt));
+          }}
+        />
+      </section>
+
+      {/* Playbook und Regel-Häkchen */}
+      <section className="td-section">
+        <PlaybookFeld
+          playbooks={buecher.daten ?? []}
+          playbookId={t.playbook_id}
+          antworten={t.rule_checks}
+          onPlaybookSetzen={async (playbook_id) => {
+            const neu = await api.trade_aendern(t.id, { playbook_id });
+            setT((alt) => (alt ? { ...alt, ...neu } : alt));
+          }}
+          onSpeichern={async (antworten) => {
+            const neu = await api.trade_regeln_setzen(t.id, antworten);
             setT((alt) => (alt ? { ...alt, ...neu } : alt));
           }}
         />

@@ -18,7 +18,14 @@
  */
 
 import { useCallback, useEffect, useRef, useState } from 'react';
-import { TAG_ARTEN, type Tag, type TagKind, type TagVorschlag } from '../lib/api';
+import {
+  TAG_ARTEN,
+  type Playbook,
+  type RegelAntwort,
+  type Tag,
+  type TagKind,
+  type TagVorschlag,
+} from '../lib/api';
 import { TagChip } from './primitives';
 
 type Zustand = 'rein' | 'geaendert' | 'speichert' | 'gespeichert' | 'fehler';
@@ -508,6 +515,370 @@ export function StimmungsWahl({
       <span style={{ fontSize: 11, color: 'var(--td-neutral)', marginLeft: 4 }}>
         {wert ? STIMMUNGEN.find((s) => s.wert === wert)?.text : 'keine Angabe'}
       </span>
+    </div>
+  );
+}
+
+/* ------------------------------------------------------------------ */
+/* Playbook und Regel-Häkchen                                          */
+/* ------------------------------------------------------------------ */
+
+/**
+ * Das Playbook eines Trades und die Antworten auf seine Regeln.
+ *
+ * **Drei Zustände, nicht zwei.** Eine Regel ist eingehalten, gebrochen —
+ * oder unbeantwortet. Der dritte ist kein Zwischending, sondern der
+ * häufigste: Man geht einen Trade durch, wenn man Zeit hat, nicht in dem
+ * Moment, in dem er einläuft. Gäbe es nur ein Kästchen an oder aus, wäre
+ * ein Trade, den man nie angesehen hat, von einem mit lauter Regelbrüchen
+ * nicht zu unterscheiden — und die Regeltreue-Quote bestrafte den, der
+ * noch nicht dazugekommen ist.
+ *
+ * **Die Auswahl des Playbooks speichert sofort, die Häkchen nicht.** Das
+ * ist kein Widerspruch zur Regel „gespeichert wird ausdrücklich", sondern
+ * ihre Voraussetzung: Erst wenn das Playbook am Trade steht, nimmt der
+ * Server überhaupt Antworten auf seine Regeln an. Ein Klick, ein
+ * eindeutiges Ergebnis, sichtbar bestätigt.
+ */
+function RegelKnopf({
+  zeichen,
+  beschriftung,
+  gedrueckt,
+  onClick,
+}: {
+  zeichen: string;
+  beschriftung: string;
+  gedrueckt: boolean;
+  onClick: () => void;
+}) {
+  return (
+    <button
+      type="button"
+      aria-label={beschriftung}
+      aria-pressed={gedrueckt}
+      onClick={onClick}
+      style={{
+        minWidth: 34,
+        minHeight: 30,
+        border: '1px solid var(--td-line)',
+        background: gedrueckt ? 'var(--td-accent)' : 'transparent',
+        color: gedrueckt ? 'var(--td-on-accent)' : 'var(--td-neutral)',
+        fontWeight: gedrueckt ? 700 : 400,
+        fontSize: 13,
+      }}
+    >
+      {zeichen}
+    </button>
+  );
+}
+
+/** Ein vergleichbarer Abdruck des Antwortstands. Sortiert, also stabil. */
+function schluesselVon(playbookId: number | null, antworten: RegelAntwort[]) {
+  return `${playbookId ?? 0}:${antworten
+    .map((a) => `${a.rule_id}${a.checked ? '1' : '0'}`)
+    .sort()
+    .join(',')}`;
+}
+
+export function PlaybookFeld({
+  playbooks,
+  playbookId,
+  antworten,
+  onPlaybookSetzen,
+  onSpeichern,
+}: {
+  playbooks: Playbook[];
+  playbookId: number | null;
+  antworten: RegelAntwort[];
+  onPlaybookSetzen: (id: number | null) => Promise<unknown>;
+  onSpeichern: (antworten: RegelAntwort[]) => Promise<unknown>;
+}) {
+  const [aktuell, setAktuell] = useState<Map<number, boolean>>(
+    new Map(antworten.map((a) => [a.rule_id, a.checked])),
+  );
+  const [zustand, setZustand] = useState<Zustand>('rein');
+  const [fehler, setFehler] = useState<string | null>(null);
+  const [wechselt, setWechselt] = useState(false);
+
+  // Kommt von außen ein anderer Trade — oder ein anderes Playbook am
+  // selben Trade —, beginnen die Häkchen von vorn. Der Schlüssel enthält
+  // die Zuordnung, weil ein Wechsel eine andere Regelliste bedeutet.
+  //
+  // Der Vergleich mit `basis` ist derselbe Kniff wie beim Notizfeld, und
+  // aus demselben Grund: Nach dem Speichern reicht die Seite den
+  // gespeicherten Stand als neues `antworten` herein. Ohne die Bedingung
+  // liefe hier der Reset, und "gespeichert" verschwände in dem
+  // Augenblick, in dem es erscheinen soll — man klickte auf Speichern und
+  // sähe nichts.
+  const schluessel = schluesselVon(playbookId, antworten);
+  const [basis, setBasis] = useState(schluessel);
+  useEffect(() => {
+    if (schluessel === basis) return;
+    setBasis(schluessel);
+    setAktuell(new Map(antworten.map((a) => [a.rule_id, a.checked])));
+    setZustand('rein');
+    setFehler(null);
+  }, [schluessel, basis, antworten]);
+
+  const buch = playbooks.find((p) => p.id === playbookId) ?? null;
+  const offen = zustand === 'geaendert' || zustand === 'fehler';
+
+  const setze = (rule_id: number, wert: boolean | null) => {
+    setAktuell((alt) => {
+      const neu = new Map(alt);
+      if (wert === null) neu.delete(rule_id);
+      else neu.set(rule_id, wert);
+      return neu;
+    });
+    setZustand('geaendert');
+  };
+
+  const speichern = async () => {
+    const gesendet = [...aktuell.entries()].map(([rule_id, checked]) => ({
+      rule_id,
+      checked,
+    }));
+    setZustand('speichert');
+    setFehler(null);
+    try {
+      await onSpeichern(gesendet);
+      // Den Bezugspunkt mitziehen, *bevor* der neue Stand als Prop
+      // hereinkommt — sonst setzt der Effekt oben die Meldung sofort
+      // wieder zurück.
+      setBasis(schluesselVon(playbookId, gesendet));
+      setZustand('gespeichert');
+    } catch (e) {
+      setZustand('fehler');
+      setFehler(e instanceof Error ? e.message : 'Speichern fehlgeschlagen');
+    }
+  };
+
+  const wechseln = async (id: number | null) => {
+    setWechselt(true);
+    setFehler(null);
+    try {
+      await onPlaybookSetzen(id);
+    } catch (e) {
+      setFehler(e instanceof Error ? e.message : 'Zuordnung fehlgeschlagen');
+      setZustand('fehler');
+    } finally {
+      setWechselt(false);
+    }
+  };
+
+  const abhakbar = buch ? buch.rules.filter((r) => r.checkable) : [];
+  const beantwortet = abhakbar.filter((r) => aktuell.has(r.id)).length;
+
+  return (
+    <div>
+      <div
+        style={{
+          display: 'flex',
+          justifyContent: 'space-between',
+          alignItems: 'baseline',
+          flexWrap: 'wrap',
+          columnGap: 10,
+          rowGap: 2,
+        }}
+      >
+        <span className="td-label">Playbook</span>
+        {wechselt ? (
+          <span role="status" style={{ fontSize: 11, color: 'var(--td-neutral)' }}>
+            speichert …
+          </span>
+        ) : (
+          <Anzeige zustand={zustand} fehler={fehler} />
+        )}
+      </div>
+
+      <select
+        aria-label="Playbook"
+        value={playbookId ?? ''}
+        disabled={wechselt}
+        onChange={(e) =>
+          void wechseln(e.target.value === '' ? null : Number(e.target.value))
+        }
+        style={{
+          width: '100%',
+          maxWidth: 420,
+          marginTop: 6,
+          padding: '8px 10px',
+          background: 'var(--td-surface)',
+          border: '1px solid var(--td-line)',
+          color: 'var(--td-text)',
+          font: 'inherit',
+          fontSize: 13,
+        }}
+      >
+        <option value="">— keinem Playbook zugeordnet —</option>
+        {playbooks.map((p) => (
+          <option key={p.id} value={p.id}>
+            {p.name}
+          </option>
+        ))}
+      </select>
+
+      {playbooks.length === 0 && (
+        <p
+          style={{
+            fontSize: 11,
+            color: 'var(--td-neutral)',
+            margin: '6px 0 0',
+            lineHeight: 1.55,
+          }}
+        >
+          Noch kein Playbook angelegt. Unter Playbooks schreibst du auf, was
+          erfüllt sein muss, bevor du einsteigst — hier hakst du es hinterher ab.
+        </p>
+      )}
+
+      {buch && buch.rules.length > 0 && (
+        <div style={{ marginTop: 12 }}>
+          <span className="td-label">
+            Regeln · {beantwortet} von {abhakbar.length} beantwortet
+          </span>
+
+          <div style={{ marginTop: 4 }}>
+            {buch.rules.map((r, i) => {
+              const vorige = i > 0 ? buch.rules[i - 1] : null;
+              const neueGruppe = vorige === null || vorige.group !== r.group;
+              const wert = aktuell.get(r.id);
+              return (
+                <div key={r.id}>
+                  {neueGruppe && (
+                    <div
+                      style={{
+                        fontSize: 10,
+                        letterSpacing: '0.06em',
+                        textTransform: 'uppercase',
+                        color: 'var(--td-neutral)',
+                        marginTop: i === 0 ? 4 : 12,
+                        marginBottom: 2,
+                      }}
+                    >
+                      {r.group}
+                    </div>
+                  )}
+                  {r.checkable ? (
+                    <div
+                      role="group"
+                      aria-label={r.text}
+                      style={{
+                        display: 'flex',
+                        gap: 8,
+                        alignItems: 'center',
+                        padding: '5px 0',
+                        borderTop: '1px solid var(--td-line)',
+                      }}
+                    >
+                      {/* Zwei Knöpfe statt eines Kästchens: Der dritte
+                          Zustand — noch nicht beantwortet — hat sonst
+                          keine eigene Darstellung. Ein zweiter Klick auf
+                          den gedrückten Knopf führt dorthin zurück.
+
+                          Beide tragen dieselbe Farbe, wenn sie gedrückt
+                          sind. Ein grünes Häkchen und ein rotes Kreuz
+                          lägen nahe, verstiessen aber gegen die erste
+                          Regel des Entwurfs: Grün und Rot gehören dem
+                          Ergebnis, und ein Regelbruch ist kein Verlust in
+                          Euro. Wer sie hier ausleiht, macht sie eine
+                          Spur beliebiger — und irgendwann sagt Rot auf
+                          dem Bildschirm nichts mehr. Das Zeichen selbst
+                          trägt die Bedeutung; die Farbe sagt nur, dass
+                          geantwortet wurde. */}
+                      <RegelKnopf
+                        zeichen="✓"
+                        beschriftung={`${r.text}: eingehalten`}
+                        gedrueckt={wert === true}
+                        onClick={() => setze(r.id, wert === true ? null : true)}
+                      />
+                      <RegelKnopf
+                        zeichen="✗"
+                        beschriftung={`${r.text}: gebrochen`}
+                        gedrueckt={wert === false}
+                        onClick={() => setze(r.id, wert === false ? null : false)}
+                      />
+                      <span style={{ fontSize: 12, lineHeight: 1.45 }}>
+                        {r.text}
+                      </span>
+                      {wert === undefined && (
+                        <span
+                          style={{
+                            marginLeft: 'auto',
+                            fontSize: 10,
+                            color: 'var(--td-neutral)',
+                            whiteSpace: 'nowrap',
+                          }}
+                        >
+                          offen
+                        </span>
+                      )}
+                    </div>
+                  ) : (
+                    /* Merksatz: nichts zum Abhaken, aber er gehört auf den
+                       Schirm — man liest ihn beim Durchgehen mit. */
+                    <div
+                      style={{
+                        padding: '5px 0 5px 2px',
+                        borderTop: '1px solid var(--td-line)',
+                        fontSize: 12,
+                        color: 'var(--td-neutral)',
+                        lineHeight: 1.45,
+                      }}
+                    >
+                      {r.text}
+                    </div>
+                  )}
+                </div>
+              );
+            })}
+          </div>
+
+          <div
+            style={{
+              display: 'flex',
+              gap: 8,
+              alignItems: 'center',
+              flexWrap: 'wrap',
+              marginTop: 10,
+            }}
+          >
+            <button
+              onClick={() => void speichern()}
+              disabled={!offen}
+              style={{
+                padding: '7px 14px',
+                background: offen ? 'var(--td-accent)' : 'transparent',
+                color: offen ? 'var(--td-on-accent)' : 'var(--td-neutral)',
+                border: '1px solid var(--td-line)',
+                cursor: offen ? 'pointer' : 'default',
+                fontWeight: 600,
+                fontSize: 12,
+              }}
+            >
+              Häkchen speichern
+            </button>
+            {offen && (
+              <button
+                onClick={() => {
+                  setAktuell(new Map(antworten.map((a) => [a.rule_id, a.checked])));
+                  setZustand('rein');
+                  setFehler(null);
+                }}
+                style={{
+                  padding: '7px 12px',
+                  background: 'transparent',
+                  border: '1px solid var(--td-line)',
+                  color: 'var(--td-neutral)',
+                  fontSize: 12,
+                }}
+              >
+                Verwerfen
+              </button>
+            )}
+          </div>
+        </div>
+      )}
     </div>
   );
 }

@@ -191,11 +191,37 @@ export interface PlaybookRegel {
   checkable: boolean;
 }
 
+/**
+ * Eine Regel auf dem Weg zum Server.
+ *
+ * `id` fehlt, solange sie neu ist. Vorhandene behalten ihre — daran
+ * hängen sämtliche Antworten, die je an ihr gesetzt wurden.
+ */
+export interface RegelEingabe {
+  id?: number;
+  group: string;
+  text: string;
+  checkable: boolean;
+}
+
 export interface Playbook {
   id: number;
   name: string;
   description: string | null;
   rules: PlaybookRegel[];
+  /** Wie viele Trades daran hängen — entscheidet über das Löschen. */
+  trade_count: number;
+}
+
+/**
+ * Die Antwort auf eine Regel bei einem Trade.
+ *
+ * Der dritte Zustand steht nicht hier drin, sondern in der Abwesenheit:
+ * Eine Regel ohne Eintrag ist **unbeantwortet**, nicht gebrochen.
+ */
+export interface RegelAntwort {
+  rule_id: number;
+  checked: boolean;
 }
 
 export interface Trade {
@@ -222,7 +248,10 @@ export interface Trade {
   is_open: boolean;
   partial: boolean;
   note: string | null;
+  playbook_id: number | null;
   tags: Tag[];
+  /** Nur die Antworten zum *zugeordneten* Playbook. */
+  rule_checks: RegelAntwort[];
 }
 
 export interface Execution {
@@ -290,6 +319,40 @@ export interface Report {
    * sagen, sonst addiert der Leser sie zu einer falschen Summe.
    */
   overlapping: boolean;
+}
+
+/** Eine Regel in der Regeltreue-Auswertung. */
+export interface RegelBilanz {
+  rule_id: number;
+  playbook_id: number;
+  playbook: string;
+  group: string;
+  text: string;
+  answered: number;
+  kept: number;
+  broken: number;
+  /** `null`, solange keine Antwort da ist — 0 hieße „nie eingehalten". */
+  rate: number | null;
+  below_min_sample: boolean;
+  pnl_kept: number;
+  pnl_broken: number;
+}
+
+export interface Regeltreue {
+  min_sample: number;
+  /** Genau zwei: `eingehalten` und `gebrochen`. */
+  groups: ReportGroup[];
+  /**
+   * Trades, die noch nicht vollständig durchgegangen sind. Sie stehen
+   * bewusst außerhalb des Vergleichs: Wer sie zu den gebrochenen zählte,
+   * bestrafte den, der noch nicht dazugekommen ist.
+   */
+  unanswered: number;
+  total_trades: number;
+  rules: RegelBilanz[];
+  overlapping: boolean;
+  /** Immer wahr: Kein Häkchen kommt aus MT5, jedes aus dem Kopf. */
+  self_reported: boolean;
 }
 
 export interface Filters {
@@ -475,4 +538,69 @@ export const api = {
 
   playbooks: (account_id?: number | null) =>
     hole<Playbook[]>(`/api/playbooks${query({ account_id })}`),
+
+  playbook_anlegen: (eingabe: {
+    name: string;
+    description?: string | null;
+    rules?: RegelEingabe[];
+  }) =>
+    hole<Playbook>('/api/playbooks', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(eingabe),
+    }),
+
+  playbook_aendern: (
+    id: number,
+    aenderung: { name?: string; description?: string | null },
+  ) =>
+    hole<Playbook>(`/api/playbooks/${id}`, {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(aenderung),
+    }),
+
+  /**
+   * Setzt die Regelliste auf genau diese Reihenfolge.
+   *
+   * Regeln mit `id` werden fortgeführt — ohne das verlöre jede Regel bei
+   * jeder Tippfehlerkorrektur ihre Antworten.
+   *
+   * Streicht der Aufruf eine Regel, an der Antworten hängen, kommt ein
+   * 409 zurück. Das ist kein Fehler, sondern die Rückfrage: erst mit
+   * `antworten_verwerfen` geht es durch.
+   */
+  playbook_regeln_setzen: (
+    id: number,
+    regeln: RegelEingabe[],
+    antworten_verwerfen = false,
+  ) =>
+    hole<Playbook>(
+      `/api/playbooks/${id}/regeln${query({
+        antworten_verwerfen: antworten_verwerfen ? 'true' : null,
+      })}`,
+      {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(regeln),
+      },
+    ),
+
+  playbook_loeschen: (id: number) =>
+    hole<{ status: string }>(`/api/playbooks/${id}`, { method: 'DELETE' }),
+
+  /**
+   * Setzt die Regel-Antworten auf genau diese Liste.
+   *
+   * Was fehlt, gilt als **unbeantwortet** — nicht als „nicht eingehalten".
+   */
+  trade_regeln_setzen: (id: number, antworten: RegelAntwort[]) =>
+    hole<Trade>(`/api/trades/${id}/regeln`, {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(antworten),
+    }),
+
+  regeltreue: (f: Filters & { min_sample?: number }) =>
+    hole<Regeltreue>(`/api/reports/regeltreue${query({ ...f })}`),
 };

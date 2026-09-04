@@ -24,7 +24,7 @@ from fastapi import Depends, FastAPI, HTTPException, Query, Request, Response
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from sqlalchemy import delete, func, select
-from sqlalchemy.orm import Session
+from sqlalchemy.orm import Session, joinedload, selectinload
 
 from .. import sicherheit
 from ..core import instruments, metrics as kern_metrics, rules, score as kern_score
@@ -940,11 +940,28 @@ def trade_block(zeile: db.Trade) -> dict:
         "is_open": kern.is_open,
         "partial": zeile.partial,
         "note": zeile.note,
+        # Die Zuordnung war schon immer setzbar, kam aber nie zurück -- die
+        # Oberfläche konnte ein Playbook auswählen und danach nicht mehr
+        # sagen, welches dransteht.
+        "playbook_id": zeile.playbook_id,
         "tags": [
             {"id": tt.tag.id, "label": tt.tag.label,
              "kind": tt.tag.kind.value if hasattr(tt.tag.kind, "value") else tt.tag.kind}
             for tt in zeile.tags
         ],
+        # Nur die Antworten zum *zugeordneten* Playbook. Wer ein Playbook
+        # wechselt, dessen alte Antworten bleiben stehen, zählen aber
+        # nirgends mit -- sie beantworten Regeln, die für diesen Trade
+        # nicht mehr gelten. Zurückgewechselt sind sie wieder da.
+        "rule_checks": (
+            [
+                {"rule_id": c.rule_id, "checked": c.checked}
+                for c in zeile.rule_checks
+                if c.rule.playbook_id == zeile.playbook_id
+            ]
+            if zeile.playbook_id is not None
+            else []
+        ),
     }
 
 
@@ -984,7 +1001,13 @@ def liste(
     ) or 0
 
     zeilen = session.scalars(
-        frage.order_by(db.Trade.opened_at.desc()).limit(limit).offset(offset)
+        frage.order_by(db.Trade.opened_at.desc())
+        .limit(limit)
+        .offset(offset)
+        # Ohne das eine Abfrage je Regel-Antwort: `trade_block` fragt jede
+        # danach, zu welchem Playbook sie gehört. Bei 200 Trades mit je
+        # acht Häkchen wären das 1.600 Abfragen für eine Seite.
+        .options(selectinload(db.Trade.rule_checks).joinedload(db.TradeRuleCheck.rule))
     ).all()
 
     return {
@@ -1192,6 +1215,149 @@ MEHRFACH_DIMENSIONEN = {
     "fehler": lambda z: _tag_schluessel(z, "fehler"),
     "emotion": lambda z: _tag_schluessel(z, "emotion"),
 }
+
+
+# Vor `/api/reports/{dimension}` eingehängt -- FastAPI nimmt die erste
+# passende Route, und der Platzhalter darunter schluckt sonst jeden Namen.
+
+
+@app.get("/api/reports/regeltreue")
+def regeltreue(
+    f: dict = Depends(filter_aus_query),
+    min_sample: int = Query(8, ge=1, description="Mindestanzahl je Gruppe"),
+    session: Session = Depends(hole_session),
+):
+    """Was die eigenen Regeln wert sind.
+
+    Zwei Fragen, und die zweite ist die eigentliche:
+
+    1. Wie oft halte ich mich an welche Regel?
+    2. **Verdiene ich mehr, wenn ich mich daran halte?** Eine Regel, deren
+       Bruch nichts kostet, ist keine Regel, sondern eine Angewohnheit.
+
+    Die Einteilung ist mit Absicht streng:
+
+    * **gebrochen** -- mindestens eine abhakbare Regel ausdrücklich mit
+      Nein beantwortet. Ein bestätigter Bruch bleibt ein Bruch, auch wenn
+      der Rest der Liste offen ist.
+    * **eingehalten** -- *alle* abhakbaren Regeln beantwortet, keine
+      gebrochen. Nicht "keine gebrochene gefunden": Sonst zählte ein
+      Trade, bei dem man nur die bequemen drei Häkchen gesetzt hat, als
+      sauber -- und die Quote misst dann Fleiss beim Abhaken.
+    * **offen** -- der Rest. Er steht getrennt in der Antwort und geht in
+      keinen Vergleich ein; ein Trade, den man noch nicht durchgegangen
+      ist, ist keine Aussage über Disziplin.
+
+    Alles hier ist selbstberichtet. Aus MT5 kommt keine dieser Antworten.
+    """
+    paare = [
+        (zeile, trade_zu_kern(zeile))
+        for zeile in zeilen_laden(session, **f)
+        if zeile.playbook_id is not None
+    ]
+    paare = [(z_, k) for z_, k in paare if not k.is_open]
+
+    buecher: dict[int, db.Playbook] = {}
+    for zeile, _ in paare:
+        if zeile.playbook_id not in buecher:
+            buch = session.get(db.Playbook, zeile.playbook_id)
+            if buch is not None:
+                buecher[zeile.playbook_id] = buch
+
+    eingehalten: list = []
+    gebrochen: list = []
+    offen: list = []
+
+    # Je Regel: beantwortet, gehalten -- und was der Bruch gekostet hat.
+    je_regel: dict[int, dict] = {}
+
+    for zeile, kern in paare:
+        buch = buecher.get(zeile.playbook_id)
+        if buch is None:
+            continue
+        pruefbar = {r.id for r in buch.rules if r.checkable}
+        antworten = {
+            c.rule_id: c.checked
+            for c in zeile.rule_checks
+            if c.rule_id in pruefbar
+        }
+
+        for rule_id, gehalten in antworten.items():
+            eintrag = je_regel.setdefault(
+                rule_id, {"gehalten": [], "verletzt": []}
+            )
+            eintrag["gehalten" if gehalten else "verletzt"].append(kern)
+
+        if any(not v for v in antworten.values()):
+            gebrochen.append(kern)
+        elif pruefbar and len(antworten) == len(pruefbar):
+            eingehalten.append(kern)
+        else:
+            offen.append(kern)
+
+    # Dieselben Felder wie bei den übrigen Rubriken -- die Oberfläche
+    # zeichnet beide mit demselben Bauteil.
+    def gruppe(name: str, menge: list) -> dict:
+        m = kern_metrics.compute(menge)
+        return {
+            "key": name,
+            "trades": m.trade_count,
+            "below_min_sample": m.trade_count < min_sample,
+            "net_pnl": z(m.net_pnl),
+            "win_rate": z(m.win_rate),
+            "profit_factor": z(m.profit_factor),
+            "expectancy": z(m.expectancy),
+            "expectancy_r": z(m.expectancy_r),
+            "avg_win": z(m.avg_win),
+            "avg_loss": z(m.avg_loss),
+            "wins": m.wins,
+            "losses": m.losses,
+        }
+
+    regeln = []
+    for buch in sorted(buecher.values(), key=lambda b: b.name):
+        for regel in sorted(buch.rules, key=lambda r: r.sort_order):
+            if not regel.checkable:
+                continue
+            eintrag = je_regel.get(regel.id, {"gehalten": [], "verletzt": []})
+            gehalten, verletzt = eintrag["gehalten"], eintrag["verletzt"]
+            beantwortet = len(gehalten) + len(verletzt)
+            regeln.append(
+                {
+                    "rule_id": regel.id,
+                    "playbook_id": buch.id,
+                    "playbook": buch.name,
+                    "group": regel.group_label,
+                    "text": regel.text,
+                    "answered": beantwortet,
+                    "kept": len(gehalten),
+                    "broken": len(verletzt),
+                    # Ohne eine einzige Antwort gibt es keine Quote. Null
+                    # wäre hier gelogen -- das hiesse "nie eingehalten".
+                    "rate": (
+                        z(Decimal(len(gehalten)) / Decimal(beantwortet))
+                        if beantwortet
+                        else None
+                    ),
+                    "below_min_sample": beantwortet < min_sample,
+                    "pnl_kept": z(kern_metrics.compute(gehalten).net_pnl),
+                    "pnl_broken": z(kern_metrics.compute(verletzt).net_pnl),
+                }
+            )
+
+    return {
+        "min_sample": min_sample,
+        "groups": [
+            gruppe("eingehalten", eingehalten),
+            gruppe("gebrochen", gebrochen),
+        ],
+        "unanswered": len(offen),
+        "total_trades": len(paare),
+        "rules": regeln,
+        # Kein Trade zählt in zwei Gruppen -- anders als bei den Tags.
+        "overlapping": False,
+        "self_reported": True,
+    }
 
 
 @app.get("/api/reports/{dimension}")
@@ -1635,6 +1801,111 @@ def journal_schreiben(
     }
 
 
+# ---------------------------------------------------------------------------
+# Playbooks
+# ---------------------------------------------------------------------------
+#
+# Ein Playbook ist die schriftliche Fassung dessen, was man zu handeln
+# behauptet. Es lohnt nur, wenn beides möglich ist: es festzuhalten und
+# hinterher je Trade zu beantworten, ob man sich daran gehalten hat.
+#
+# Zwei Festlegungen, die alles darunter tragen:
+#
+# * **Regeln werden geändert, nicht ersetzt.** Ein `PUT` auf die Regelliste
+#   führt Einträge mit `id` fort und legt nur die ohne neu an. Würde die
+#   Liste jedes Mal gelöscht und neu geschrieben, verlöre jede Regel bei
+#   jeder Tippfehlerkorrektur ihre ID -- und mit ihr sämtliche Antworten,
+#   die je an ihr hingen.
+# * **Antworten gehen nicht beiläufig verloren.** Eine Regel, an der
+#   Antworten hängen, verschwindet nur auf ausdrückliche Ansage. Sonst
+#   löschte ein unbedachtes Streichen die halbe Regeltreue-Statistik.
+
+
+def regel_block(r: db.PlaybookRule) -> dict:
+    return {
+        "id": r.id,
+        "group": r.group_label,
+        "text": r.text,
+        "checkable": r.checkable,
+    }
+
+
+def playbook_block(session: Session, b: db.Playbook) -> dict:
+    return {
+        "id": b.id,
+        "name": b.name,
+        "description": b.description,
+        "rules": [regel_block(r) for r in sorted(b.rules, key=lambda r: r.sort_order)],
+        # Wie viele Trades daran hängen -- die Oberfläche entscheidet
+        # damit, ob sie das Löschen überhaupt anbietet.
+        "trade_count": session.scalar(
+            select(func.count())
+            .select_from(db.Trade)
+            .where(db.Trade.playbook_id == b.id)
+        )
+        or 0,
+    }
+
+
+def hole_eigenes_playbook(
+    session: Session, nutzer: db.User, playbook_id: int
+) -> db.Playbook:
+    """Ein Playbook, aber nur das eigene.
+
+    404 auch dann, wenn es fremd ist: Ein 403 verriete, dass es die ID
+    gibt.
+    """
+    buch = session.get(db.Playbook, playbook_id)
+    if buch is None or buch.user_id != nutzer.id:
+        raise HTTPException(404, "Playbook nicht gefunden")
+    return buch
+
+
+class RegelEingabe(BaseModel):
+    """Eine Regel in der Liste.
+
+    `id` ist da, wenn die Regel schon existiert -- dann wird sie geändert
+    statt neu angelegt, und ihre Antworten bleiben ihr erhalten.
+    """
+
+    id: int | None = None
+    group: str = "Allgemein"
+    text: str
+    checkable: bool = True
+
+
+class PlaybookEingabe(BaseModel):
+    name: str
+    description: str | None = None
+    rules: list[RegelEingabe] = []
+
+
+class PlaybookAenderung(BaseModel):
+    name: str | None = None
+    description: str | None = None
+
+
+def _pruefe_regeln(regeln: list[RegelEingabe]) -> None:
+    if len(regeln) > 60:
+        raise HTTPException(400, "Höchstens 60 Regeln je Playbook")
+    for r in regeln:
+        if not r.text.strip():
+            raise HTTPException(400, "Eine Regel ohne Text sagt nichts")
+        if len(r.text) > 500:
+            raise HTTPException(400, f"Regel zu lang: {r.text[:40]}…")
+        if len(r.group) > 120:
+            raise HTTPException(400, f"Gruppenname zu lang: {r.group[:40]}…")
+
+
+def _pruefe_namen(name: str) -> str:
+    text = name.strip()
+    if not text:
+        raise HTTPException(400, "Das Playbook braucht einen Namen")
+    if len(text) > 120:
+        raise HTTPException(400, "Name zu lang (höchstens 120 Zeichen)")
+    return text
+
+
 @app.get("/api/playbooks")
 def playbooks(
     account_id: int | None = Query(None),
@@ -1649,24 +1920,249 @@ def playbooks(
         .where(db.Playbook.user_id == nutzer.id)
         .order_by(db.Playbook.name)
     )
+    return [playbook_block(session, b) for b in session.scalars(frage).all()]
 
-    return [
-        {
-            "id": b.id,
-            "name": b.name,
-            "description": b.description,
-            "rules": [
-                {
-                    "id": r.id,
-                    "group": r.group_label,
-                    "text": r.text,
-                    "checkable": r.checkable,
-                }
-                for r in sorted(b.rules, key=lambda r: r.sort_order)
-            ],
-        }
-        for b in session.scalars(frage).all()
-    ]
+
+@app.post("/api/playbooks", status_code=201)
+def playbook_anlegen(
+    eingabe: PlaybookEingabe,
+    nutzer: db.User = Depends(aktueller_nutzer),
+    session: Session = Depends(hole_session),
+):
+    """Ein neues Playbook, gleich mit seinen Regeln."""
+    name = _pruefe_namen(eingabe.name)
+    _pruefe_regeln(eingabe.rules)
+
+    buch = db.Playbook(
+        user_id=nutzer.id,
+        name=name,
+        description=(eingabe.description or "").strip() or None,
+    )
+    session.add(buch)
+    session.flush()
+
+    for i, r in enumerate(eingabe.rules):
+        session.add(
+            db.PlaybookRule(
+                playbook_id=buch.id,
+                group_label=r.group.strip() or "Allgemein",
+                text=r.text.strip(),
+                checkable=r.checkable,
+                sort_order=i,
+            )
+        )
+
+    session.commit()
+    session.refresh(buch)
+    return playbook_block(session, buch)
+
+
+@app.patch("/api/playbooks/{playbook_id}")
+def playbook_aendern(
+    playbook_id: int,
+    aenderung: PlaybookAenderung,
+    nutzer: db.User = Depends(aktueller_nutzer),
+    session: Session = Depends(hole_session),
+):
+    """Name und Beschreibung. Die Regeln haben ihren eigenen Endpunkt."""
+    buch = hole_eigenes_playbook(session, nutzer, playbook_id)
+    gesetzt = aenderung.model_fields_set
+
+    if "name" in gesetzt:
+        buch.name = _pruefe_namen(aenderung.name or "")
+    if "description" in gesetzt:
+        text = (aenderung.description or "").strip()
+        if len(text) > 5_000:
+            raise HTTPException(400, "Beschreibung zu lang (höchstens 5.000 Zeichen)")
+        buch.description = text or None
+
+    session.commit()
+    session.refresh(buch)
+    return playbook_block(session, buch)
+
+
+@app.put("/api/playbooks/{playbook_id}/regeln")
+def playbook_regeln_setzen(
+    playbook_id: int,
+    liste: list[RegelEingabe],
+    antworten_verwerfen: bool = Query(
+        False,
+        description="Regeln auch dann streichen, wenn Antworten daran hängen",
+    ),
+    nutzer: db.User = Depends(aktueller_nutzer),
+    session: Session = Depends(hole_session),
+):
+    """Setzt die Regelliste auf genau diese Reihenfolge.
+
+    Einträge mit `id` werden fortgeführt, Einträge ohne neu angelegt, und
+    was fehlt, wird gestrichen. Die Reihenfolge in der Liste ist die
+    Reihenfolge auf dem Bildschirm.
+
+    Streichen ist der heikle Teil: An einer Regel können Antworten von
+    Dutzenden Trades hängen, und die stehen nirgends sonst. Wer eine
+    solche Regel entfernt, bekommt deshalb zuerst ein 409 mit der Zahl
+    der betroffenen Antworten und muss ausdrücklich zustimmen.
+    """
+    buch = hole_eigenes_playbook(session, nutzer, playbook_id)
+    _pruefe_regeln(liste)
+
+    vorhanden = {r.id: r for r in buch.rules}
+
+    # Eine fremde ID hier wäre entweder ein Fehler der Oberfläche oder ein
+    # Versuch, eine fremde Regel unter das eigene Playbook zu hängen.
+    for r in liste:
+        if r.id is not None and r.id not in vorhanden:
+            raise HTTPException(404, f"Regel {r.id} gehört nicht zu diesem Playbook")
+
+    behalten = {r.id for r in liste if r.id is not None}
+    zu_streichen = [r for r in buch.rules if r.id not in behalten]
+
+    if zu_streichen:
+        betroffen = (
+            session.scalar(
+                select(func.count())
+                .select_from(db.TradeRuleCheck)
+                .where(db.TradeRuleCheck.rule_id.in_([r.id for r in zu_streichen]))
+            )
+            or 0
+        )
+        if betroffen and not antworten_verwerfen:
+            raise HTTPException(
+                409,
+                f"An den gestrichenen Regeln hängen {betroffen} Antworten. "
+                "Zum Streichen ausdrücklich bestätigen.",
+            )
+        session.execute(
+            delete(db.TradeRuleCheck).where(
+                db.TradeRuleCheck.rule_id.in_([r.id for r in zu_streichen])
+            )
+        )
+        for r in zu_streichen:
+            session.delete(r)
+
+    for i, eingabe in enumerate(liste):
+        if eingabe.id is None:
+            session.add(
+                db.PlaybookRule(
+                    playbook_id=buch.id,
+                    group_label=eingabe.group.strip() or "Allgemein",
+                    text=eingabe.text.strip(),
+                    checkable=eingabe.checkable,
+                    sort_order=i,
+                )
+            )
+            continue
+        regel = vorhanden[eingabe.id]
+        regel.group_label = eingabe.group.strip() or "Allgemein"
+        regel.text = eingabe.text.strip()
+        regel.checkable = eingabe.checkable
+        regel.sort_order = i
+
+    session.commit()
+    session.refresh(buch)
+    return playbook_block(session, buch)
+
+
+@app.delete("/api/playbooks/{playbook_id}")
+def playbook_loeschen(
+    playbook_id: int,
+    nutzer: db.User = Depends(aktueller_nutzer),
+    session: Session = Depends(hole_session),
+):
+    """Löscht ein Playbook, an dem kein Trade mehr hängt.
+
+    Hängen welche daran, kommt 409 statt einer stillen Entkopplung: Die
+    Zuordnung ist eine Aussage über vergangene Trades, und die verschwände
+    hier mit.
+    """
+    buch = hole_eigenes_playbook(session, nutzer, playbook_id)
+
+    anzahl = (
+        session.scalar(
+            select(func.count())
+            .select_from(db.Trade)
+            .where(db.Trade.playbook_id == playbook_id)
+        )
+        or 0
+    )
+    if anzahl:
+        raise HTTPException(
+            409,
+            f"An diesem Playbook hängen {anzahl} Trades. "
+            "Erst dort abwählen, dann löschen.",
+        )
+
+    ids = [r.id for r in buch.rules]
+    if ids:
+        session.execute(
+            delete(db.TradeRuleCheck).where(db.TradeRuleCheck.rule_id.in_(ids))
+        )
+    session.delete(buch)
+    session.commit()
+    return {"status": "geloescht", "id": playbook_id}
+
+
+class RegelAntwort(BaseModel):
+    rule_id: int
+    checked: bool
+
+
+@app.put("/api/trades/{trade_id}/regeln")
+def trade_regeln_setzen(
+    trade_id: int,
+    antworten: list[RegelAntwort],
+    nutzer: db.User = Depends(aktueller_nutzer),
+    session: Session = Depends(hole_session),
+):
+    """Setzt die Regel-Antworten eines Trades auf genau diese Liste.
+
+    Wie bei den Tags: die ganze Liste, nicht einzelne Häkchen. Zweimal
+    geschickt ergibt zweimal dasselbe.
+
+    Was nicht in der Liste steht, gilt als **unbeantwortet** und wird
+    entfernt -- nicht als "nicht eingehalten". Das ist der Unterschied,
+    an dem die ganze Kennzahl hängt: Ein Trade, den man noch nicht
+    durchgegangen ist, darf die Regeltreue nicht drücken.
+
+    Beantwortbar sind nur Regeln des Playbooks, das an diesem Trade
+    hängt. Ein Häkchen an einer Regel aus einem anderen Playbook wäre
+    eine Antwort auf eine Frage, die für diesen Trade nie gestellt wurde.
+    """
+    zeile = hole_eigenen_trade(session, nutzer, trade_id)
+
+    if zeile.playbook_id is None:
+        if not antworten:
+            return trade_block(zeile)
+        raise HTTPException(
+            400, "Erst ein Playbook zuordnen, dann die Regeln beantworten"
+        )
+
+    buch = hole_eigenes_playbook(session, nutzer, zeile.playbook_id)
+    erlaubt = {r.id for r in buch.rules}
+
+    gesehen: dict[int, bool] = {}
+    for a in antworten:
+        if a.rule_id not in erlaubt:
+            raise HTTPException(
+                400, f"Regel {a.rule_id} gehört nicht zum Playbook dieses Trades"
+            )
+        # Doppelte in der Eingabe: die letzte gilt.
+        gesehen[a.rule_id] = a.checked
+
+    session.execute(
+        delete(db.TradeRuleCheck).where(
+            db.TradeRuleCheck.trade_id == trade_id,
+            db.TradeRuleCheck.rule_id.in_(erlaubt),
+        )
+    )
+    for rule_id, gehalten in gesehen.items():
+        session.add(
+            db.TradeRuleCheck(trade_id=trade_id, rule_id=rule_id, checked=gehalten)
+        )
+
+    session.commit()
+    session.refresh(zeile)
+    return trade_block(zeile)
 
 
 # ---------------------------------------------------------------------------

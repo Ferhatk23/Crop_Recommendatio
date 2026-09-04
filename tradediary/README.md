@@ -59,7 +59,7 @@ web/                   # Next.js 15, React 19, TypeScript
 ├── lib/               # outcome(), Formatierung, API-Client
 ├── components/        # Kacheln, Diagramme, Listen, Gerüst
 └── app/               # Dashboard, Kalender, Trades, Reports, Journal,
-                       # Einstellungen
+                       # Playbooks, Einstellungen
 ```
 
 ## Die zwei Wege von Deals zu Trades
@@ -142,8 +142,8 @@ die Tabelle.
 
 ## Schreiben — was der Nutzer hinterlässt
 
-Notiz am Trade, Tags, Playbook-Zuordnung, Tagesnotiz und Verfassung.
-Drei Festlegungen gelten für alles davon:
+Notiz am Trade, Tags, Playbook-Zuordnung samt Regel-Häkchen, Tagesnotiz
+und Verfassung. Drei Festlegungen gelten für alles davon:
 
 - **PATCH ändert nur, was dasteht.** Ein weggelassenes Feld bleibt, wie es
   war; ein ausdrückliches `null` löscht. Ohne die Unterscheidung könnte die
@@ -179,6 +179,70 @@ Antwort:
 Tags ohne Trade stehen nicht in den Vorschlägen: Die Liste ist zum
 Wiederverwenden da. Gelöscht wird trotzdem nichts — wer die Bezeichnung
 erneut tippt, bekommt dieselbe Marke wieder.
+
+## Playbooks und Regeltreue
+
+Ein Playbook ist die schriftliche Fassung dessen, was man zu handeln
+behauptet: ein Name, eine Beschreibung und eine geordnete Regelliste. Die
+Reihenfolge ist der Ablauf und wird deshalb nirgends sortiert.
+
+Regeln sind entweder **abhakbar** oder ein **Merksatz**. Der Unterschied
+ist nicht kosmetisch: Nur abhakbare bekommen am Trade ein Kästchen und
+zählen in die Quote. „Nicht in die Nachricht hineintraden" ist richtig und
+wichtig, lässt sich am einzelnen Trade aber nicht mit ja oder nein
+beantworten — in einer Quote wäre es Füllmaterial.
+
+### Drei Zustände, nicht zwei
+
+Eine Regel ist **eingehalten**, **gebrochen** oder **unbeantwortet**. Der
+dritte ist kein Zwischending, sondern der häufigste: Man geht einen Trade
+durch, wenn man Zeit hat, nicht in dem Moment, in dem er einläuft.
+
+Gäbe es nur ein Kästchen an oder aus, wäre ein Trade, den man nie
+angesehen hat, von einem mit lauter Regelbrüchen nicht zu unterscheiden —
+und die Regeltreue eines frisch eingelaufenen Trades stünde bei 0 %. Die
+Zahl, die Disziplin messen soll, bestrafte damit den, der noch nicht
+dazugekommen ist. Deshalb ist „unbeantwortet" die fehlende Zeile, und
+`PUT /api/trades/{id}/regeln` entfernt, was nicht in der Liste steht,
+statt es auf Nein zu setzen.
+
+### Was `/api/reports/regeltreue` zusammenzählt
+
+- **gebrochen** — mindestens eine abhakbare Regel ausdrücklich mit Nein
+  beantwortet. Ein bestätigter Bruch bleibt ein Bruch, auch wenn der Rest
+  der Liste offen ist.
+- **eingehalten** — *alle* abhakbaren Regeln beantwortet, keine gebrochen.
+  Nicht „keine gebrochene gefunden": Sonst zählte ein Trade, bei dem man
+  nur die bequemen drei Häkchen gesetzt hat, als sauber — und die Quote
+  misst dann Fleiß beim Abhaken.
+- **offen** — der Rest. Steht getrennt in der Antwort (`unanswered`) und
+  geht in keinen Vergleich ein.
+
+Je Regel kommt zusätzlich, was ihr Bruch gekostet hat (`pnl_kept` gegen
+`pnl_broken`). Das ist der eigentliche Zweck: Eine Regel, deren Bruch
+nichts kostet, ist keine Regel, sondern eine Angewohnheit.
+
+Die Antwort trägt `self_reported: true`, und die Oberfläche schreibt es
+hin. **Nichts davon wird aus MT5 abgeleitet.** Ein Teil dieser Regeln wäre
+es (»Stop gesetzt« steht in `initial_sl`), aber abgeleitet wird noch
+nichts — die Quote misst, was der Händler über sich notiert hat.
+
+### Was beim Ändern nicht verlorengeht
+
+Regeln behalten beim Speichern ihre `id`. Ohne das verlöre jede
+Tippfehlerkorrektur sämtliche Häkchen, die je an dieser Regel hingen —
+lautlos, denn die Oberfläche zeigte danach einfach leere Kästchen. Wer
+eine Regel wirklich streicht, an der Antworten hängen, bekommt erst ein
+409 mit deren Anzahl und muss ausdrücklich zustimmen.
+
+Die Antworten überleben außerdem den Neuaufbau der Trades — dieselbe
+Falle wie bei den Tags, die dort schon einmal zugeschlagen hat, und aus
+demselben Grund ausdrücklich mitgeführt.
+
+Ein Playbook-Wechsel am Trade löscht die alten Antworten nicht, zeigt und
+zählt sie aber nicht mehr: Sie beantworten Regeln, die für diesen Trade
+nicht mehr gelten. Zurückgewechselt sind sie wieder da — ein Fehlgriff in
+der Auswahlliste ist damit umkehrbar.
 
 ## Die Oberfläche
 
@@ -435,6 +499,7 @@ node tools/pruefe-anmeldung.mjs        # Anmeldung, Cookie, Abmelden
 node tools/pruefe-oberflaeche.mjs      # Darstellung auf drei Breiten
 node tools/pruefe-schreiben.mjs        # Speichern und Wiederfinden
 node tools/pruefe-konten.mjs           # Konto anlegen, Grenzwerte, Löschen
+node tools/pruefe-playbooks.mjs        # Playbook, Regel-Häkchen, Regeltreue
 node tools/pruefe-oberflaeche.mjs --bilder   # zusätzlich Screenshots
 ```
 
@@ -473,6 +538,19 @@ Die Meldung „gespeichert" verschwand im selben Augenblick, in dem sie
 erscheinen sollte, weil die Seite den gespeicherten Wert zurückreichte und
 damit den Zurücksetzen-Effekt auslöste.
 
+Derselbe Fehler ist beim Regel-Feld ein zweites Mal entstanden und dort
+wieder vom Browser-Lauf gefunden worden — die API-Tests waren grün, die
+Häkchen standen nach dem Neuladen richtig, und trotzdem sah der Nutzer
+beim Klick auf Speichern nichts. Ein Muster, das man einmal repariert
+hat, baut man beim nächsten Mal wieder ein; nur der Lauf im Browser merkt
+es.
+
+`pruefe-playbooks.mjs` prüft zusätzlich die teuerste denkbare Verwechslung:
+eine Regel umformulieren und dabei die Häkchen von Dutzenden Trades
+verlieren. Der Verlust fiele nicht auf — die Kästchen wären danach einfach
+leer. Und es räumt hinter sich auf, damit nicht jeder Lauf ein Playbook
+mehr in der Datenbank hinterlässt.
+
 ## Was noch nicht da ist
 
 Damit der Stand nicht besser klingt, als er ist:
@@ -482,9 +560,12 @@ Damit der Stand nicht besser klingt, als er ist:
   ob das echte Terminal dieselben Felder unter denselben Namen liefert und
   ob die Annahme über die Zeitzone am Server von Alpha Capital stimmt, lässt
   sich nur dort prüfen. Der erste Lauf gehört gegen ein Demo-Konto.
-- **Playbook-Seiten.** Playbooks lassen sich einem Trade zuordnen und über
-  `/api/playbooks` lesen, aber nicht in der Oberfläche anlegen oder
-  bearbeiten — und die Regel-Häkchen je Trade werden noch nicht gespeichert.
+- **Regeln, die sich selbst prüfen.** Jedes Häkchen ist heute
+  selbstberichtet. Ein Teil der Regeln wäre aus den Deals ableitbar
+  (»Stop gesetzt« steht in `initial_sl`, »höchstens 1 % Risiko« in
+  `risk_amount`), aber abgeleitet wird noch nichts. Die Regeltreue misst
+  die eigene Selbsteinschätzung — nützlich, solange man weiß, dass es das
+  ist, und die Antwort sagt es mit `self_reported`.
 - **Spaltenzuordnung für den CSV-Import** lässt sich nur über die API
   mitgeben, nicht in der Oberfläche einstellen. Die Erkennung trifft die
   gängigen Broker-Exporte von selbst; bei einem exotischen Format braucht es
@@ -500,7 +581,11 @@ Damit der Stand nicht besser klingt, als er ist:
 
 1. **Auf dem Ubuntu-Rechner einrichten** und den Sammler an ein Demo-Konto
    hängen. Die beiden verbliebenen ungeprüften Punkte, beide nur dort prüfbar.
-2. **Playbook-Seiten** samt Regel-Häkchen je Trade — die letzte grössere
-   Lücke: Playbooks lassen sich zuordnen, aber nicht in der Oberfläche
-   anlegen, und die Häkchen je Trade werden noch nicht gespeichert.
-3. **Schema-Wanderungen**, sobald sich das Datenmodell im Betrieb ändert.
+2. **Schema-Wanderungen.** `trade_rule_checks` ist die erste Tabelle, die zu
+   einer schon laufenden Installation dazukäme. Das geht noch von selbst:
+   `init_db()` ruft beim Start `create_all`, und an einer Datenbank ohne
+   diese Tabelle nachgemessen — sie ist nach dem nächsten Start da, mit
+   allen drei Spalten. Was `create_all` *nicht* kann, ist eine geänderte
+   Spalte. Spätestens dafür braucht es Alembic.
+3. **Regeln aus den Deals ableiten**, damit ein Teil der Häkchen nicht mehr
+   vom Gedächtnis abhängt.

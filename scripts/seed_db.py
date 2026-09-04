@@ -118,6 +118,39 @@ def main() -> None:
         print("  Neues setzen: python scripts/nutzer.py passwort <email>")
 
 
+def beantworte_regeln(s, rng, trade, pruefbare, verlust: bool) -> int:
+    """Hakt die Regeln eines Trades ab -- oder eben nicht.
+
+    Drei Faelle, und der dritte ist der wichtigste:
+
+    * **Vollstaendig beantwortet, alles gehalten.** Der saubere Trade.
+    * **Mindestens eine gebrochen.** Ueberwiegend bei Verlusten -- nicht,
+      weil das huebscher aussieht, sondern weil die Auswertung sonst flach
+      herauskaeme und man nicht saehe, ob sie etwas misst.
+    * **Gar nicht oder halb beantwortet.** Wer sein Journal fuehrt, fuehrt
+      es lueckenhaft. Diese Trades muessen in den Beispieldaten vorkommen,
+      sonst entwickelt man die Regeltreue an einem Bildschirm, auf dem der
+      haeufigste Fall nie auftaucht.
+    """
+    if not pruefbare or rng.random() < 0.25:
+        return 0
+
+    # Bei einem Verlust haeufiger ein Bruch -- und bei Gewinnen kommt er
+    # trotzdem vor, sonst waere die Kennzahl bloss ein zweites Vorzeichen.
+    bricht = rng.random() < (0.45 if verlust else 0.12)
+    gebrochene = {rng.choice(pruefbare).id} if bricht else set()
+
+    # Ein Teil bleibt absichtlich halb ausgefuellt.
+    liste = pruefbare if rng.random() > 0.18 else pruefbare[: max(1, len(pruefbare) // 2)]
+
+    gesetzt = 0
+    for regel in liste:
+        s.add(m.TradeRuleCheck(trade_id=trade.id, rule_id=regel.id,
+                               checked=regel.id not in gebrochene))
+        gesetzt += 1
+    return gesetzt
+
+
 def verteile_beschriftungen(s, marken, pb, setups, fehler, emotionen) -> None:
     """Haengt Tags, Notizen und Tagesjournale an die erzeugten Trades.
 
@@ -144,6 +177,8 @@ def verteile_beschriftungen(s, marken, pb, setups, fehler, emotionen) -> None:
     trades = s.query(m.Trade).all()
     verknuepft = 0
     notizen = 0
+    haken = 0
+    pruefbare = [r for r in pb.rules if r.checkable]
 
     notiztexte = [
         "Plan war sauber, Ausfuehrung auch. Nichts zu aendern.",
@@ -180,6 +215,7 @@ def verteile_beschriftungen(s, marken, pb, setups, fehler, emotionen) -> None:
 
         if rng.random() < 0.35:
             t.playbook_id = pb.id
+            haken += beantworte_regeln(s, rng, t, pruefbare, verlust)
 
     # Tagesjournale fuer einen Teil der Handelstage.
     tagebuch = 0
@@ -207,7 +243,7 @@ def verteile_beschriftungen(s, marken, pb, setups, fehler, emotionen) -> None:
 
     s.commit()
     print(f"  {verknuepft} Tag-Zuordnungen, {notizen} Notizen, "
-          f"{tagebuch} Tagesjournale")
+          f"{tagebuch} Tagesjournale, {haken} Regel-Antworten")
 
 
 if __name__ == "__main__":

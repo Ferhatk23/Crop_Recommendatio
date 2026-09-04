@@ -129,7 +129,7 @@ export function Anmeldung() {
                 color: 'var(--td-neg)',
                 fontWeight: 600,
                 borderLeft: '3px solid var(--td-neg-str)',
-                background: 'var(--td-neg-t)',
+                background: 'var(--td-neg-tint)',
               }}
             >
               ⚠ {fehler}

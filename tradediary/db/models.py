@@ -285,6 +285,9 @@ class Trade(Base):
     tags: Mapped[list["TradeTag"]] = relationship(
         back_populates="trade", cascade="all, delete-orphan"
     )
+    rule_checks: Mapped[list["TradeRuleCheck"]] = relationship(
+        back_populates="trade", cascade="all, delete-orphan"
+    )
 
 
 class Tag(Base):
@@ -325,11 +328,18 @@ class Playbook(Base):
 class PlaybookRule(Base):
     """Eine Regel im Playbook.
 
-    Der Unterschied zwischen prüfbar und selbstberichtet ist strukturell,
-    nicht kosmetisch: Nur prüfbare Regeln lassen sich aus MT5-Daten
-    ableiten und zählen in die Regeltreue. Selbstberichtete werden angezeigt,
-    aber aus der Statistik herausgehalten -- sonst misst man Ehrlichkeit
-    und nennt es Disziplin.
+    Der Unterschied zwischen abhakbar und nicht abhakbar ist strukturell,
+    nicht kosmetisch: Nur abhakbare Regeln bekommen am Trade ein Kästchen
+    und zählen in die Regeltreue. Die übrigen stehen als Merksatz daneben --
+    "Nicht in die Nachricht hineintraden" ist richtig und wichtig, aber
+    nichts, was sich am einzelnen Trade mit ja oder nein beantworten liesse.
+    Zwänge man sie in dieselbe Quote, bestünde die Zahl zur Hälfte aus
+    Antworten auf Fragen, die keine sind.
+
+    Die Antwort selbst ist heute in jedem Fall selbstberichtet -- siehe
+    :class:`TradeRuleCheck`. Ein Teil dieser Regeln wäre aus den Deals
+    ableitbar ("Stop gesetzt" steht in ``initial_sl``), aber abgeleitet
+    wird noch nichts.
     """
 
     __tablename__ = "playbook_rules"
@@ -342,6 +352,40 @@ class PlaybookRule(Base):
     sort_order: Mapped[int] = mapped_column(Integer, default=0)
 
     playbook: Mapped["Playbook"] = relationship(back_populates="rules")
+    checks: Mapped[list["TradeRuleCheck"]] = relationship(
+        back_populates="rule", cascade="all, delete-orphan"
+    )
+
+
+class TradeRuleCheck(Base):
+    """Die Antwort auf eine Regel bei einem bestimmten Trade.
+
+    Drei Zustände, nicht zwei: eingehalten, gebrochen, **nicht
+    beantwortet**. Der dritte braucht deshalb eine eigene Darstellung --
+    die fehlende Zeile. Wer nur die Häkchen speicherte, könnte einen
+    Trade, den er nie durchgegangen ist, nicht von einem unterscheiden,
+    bei dem er jede Regel gebrochen hat. Die Regeltreue eines frisch
+    eingelaufenen Trades stünde dann bei 0 %, und die Zahl, die
+    Disziplin messen soll, bestrafte den, der noch nicht dazugekommen
+    ist.
+
+    Selbstberichtet: Nichts davon wird aus MT5-Daten abgeleitet. Die
+    Quote misst, was der Händler über sich selbst notiert hat -- nützlich,
+    solange man weiss, dass es das ist.
+    """
+
+    __tablename__ = "trade_rule_checks"
+
+    trade_id: Mapped[int] = mapped_column(
+        ForeignKey("trades.id"), primary_key=True
+    )
+    rule_id: Mapped[int] = mapped_column(
+        ForeignKey("playbook_rules.id"), primary_key=True
+    )
+    checked: Mapped[bool] = mapped_column(Boolean)
+
+    trade: Mapped["Trade"] = relationship(back_populates="rule_checks")
+    rule: Mapped["PlaybookRule"] = relationship(back_populates="checks")
 
 
 class JournalEntry(Base):
