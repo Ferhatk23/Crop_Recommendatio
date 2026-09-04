@@ -10,7 +10,7 @@
  * Geprüft wird jeweils die ganze Kette: tippen, speichern, Seite neu
  * laden, wiederfinden.
  *
- *   node tools/pruefe-schreiben.mjs
+ *   TD_EMAIL=… TD_PASSWORT=… node tools/pruefe-schreiben.mjs
  *
  * Voraussetzung: Oberfläche und API laufen.
  */
@@ -34,9 +34,30 @@ const pruefe = (bedingung, text) => {
   if (!bedingung) fehler.push(text);
 };
 
+const EMAIL = process.env.TD_EMAIL;
+const PASSWORT = process.env.TD_PASSWORT;
+if (!EMAIL || !PASSWORT) {
+  console.error(
+    'TD_EMAIL und TD_PASSWORT setzen (aus der Ausgabe von scripts/seed_db.py).',
+  );
+  process.exit(2);
+}
+
 const browser = await chromium.launch(CHROME ? { executablePath: CHROME } : {});
 const ctx = await browser.newContext({ viewport: { width: 1280, height: 1000 } });
 const page = await ctx.newPage();
+
+// Ohne Anmeldung zeigt jede Seite nur das Anmeldeformular.
+await page.goto(BASIS + '/', { waitUntil: 'networkidle' });
+await page.getByLabel('E-Mail').fill(EMAIL);
+await page.getByLabel('Passwort').fill(PASSWORT);
+await page.getByRole('button', { name: 'Anmelden' }).click();
+await page.waitForTimeout(2000);
+if (await page.getByLabel('Passwort').count()) {
+  console.error('Anmeldung fehlgeschlagen -- stimmen TD_EMAIL und TD_PASSWORT?');
+  await browser.close();
+  process.exit(2);
+}
 page.on('pageerror', (e) => fehler.push(`Ausnahme: ${e.message}`));
 page.on('console', (m) => {
   if (m.type() === 'error') fehler.push(`Konsole: ${m.text()}`);

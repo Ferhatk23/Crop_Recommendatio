@@ -23,8 +23,8 @@ import {
   useState,
   type ReactNode,
 } from 'react';
-import type { Account, Filters } from '../lib/api';
-import { api } from '../lib/api';
+import type { Account, Filters, Nutzer } from '../lib/api';
+import { NichtAngemeldet, api } from '../lib/api';
 import type { Unit } from '../lib/format';
 
 type Theme = 'light' | 'dark';
@@ -48,6 +48,13 @@ interface Zustand {
 
   laden: boolean;
   fehler: string | null;
+
+  /** `null`, solange unbekannt; `false`-artig heißt nicht angemeldet. */
+  nutzer: Nutzer | null;
+  angemeldet: boolean;
+  /** Nach erfolgreicher Anmeldung aufgerufen, lädt die Konten nach. */
+  neuLaden: () => void;
+  abmelden: () => Promise<void>;
 }
 
 const Kontext = createContext<Zustand | null>(null);
@@ -67,12 +74,27 @@ export function AppState({ children }: { children: ReactNode }) {
   const [theme, setTheme] = useState<Theme>('light');
   const [laden, setLaden] = useState(true);
   const [fehler, setFehler] = useState<string | null>(null);
+  const [nutzer, setNutzer] = useState<Nutzer | null>(null);
+  const [angemeldet, setAngemeldet] = useState(false);
+  const [runde, setRunde] = useState(0);
+
+  const neuLaden = useCallback(() => setRunde((r) => r + 1), []);
 
   useEffect(() => {
     let abgebrochen = false;
+    setLaden(true);
+    setFehler(null);
+
+    // Erst wer, dann was. Ohne die Reihenfolge sähe ein abgelaufenes
+    // Cookie aus wie ein Serverfehler — und die App zeigte eine rote
+    // Meldung statt der Anmeldeseite.
     api
-      .accounts()
-      .then((liste) => {
+      .ich()
+      .then(async (ich) => {
+        if (abgebrochen) return;
+        setNutzer(ich);
+        setAngemeldet(true);
+        const liste = await api.accounts();
         if (abgebrochen) return;
         setAccounts(liste);
         // Standardmäßig das erste aktive Konto — ein verlorenes Konto
@@ -80,11 +102,36 @@ export function AppState({ children }: { children: ReactNode }) {
         const aktiv = liste.find((a) => a.status === 'aktiv') ?? liste[0];
         setAccountId(aktiv?.id ?? null);
       })
-      .catch((e) => !abgebrochen && setFehler(String(e.message ?? e)))
+      .catch((e) => {
+        if (abgebrochen) return;
+        if (e instanceof NichtAngemeldet) {
+          // Kein Fehler, ein Zustand.
+          setAngemeldet(false);
+          setNutzer(null);
+          setAccounts([]);
+          setAccountId(null);
+        } else {
+          setFehler(String(e?.message ?? e));
+        }
+      })
       .finally(() => !abgebrochen && setLaden(false));
     return () => {
       abgebrochen = true;
     };
+  }, [runde]);
+
+  const abmelden = useCallback(async () => {
+    try {
+      await api.abmelden();
+    } finally {
+      // Auch wenn der Aufruf scheitert: lokal abgemeldet. Alles andere
+      // hieße, den Nutzer in einer Sitzung festzuhalten, die er beenden
+      // wollte.
+      setAngemeldet(false);
+      setNutzer(null);
+      setAccounts([]);
+      setAccountId(null);
+    }
   }, []);
 
   useEffect(() => {
@@ -140,10 +187,15 @@ export function AppState({ children }: { children: ReactNode }) {
       toggleTheme,
       laden,
       fehler,
+      nutzer,
+      angemeldet,
+      neuLaden,
+      abmelden,
     };
   }, [
     accounts, accountId, filters, setFilters, resetFilters,
     unit, theme, toggleTheme, laden, fehler,
+    nutzer, angemeldet, neuLaden, abmelden,
   ]);
 
   return <Kontext.Provider value={wert}>{children}</Kontext.Provider>;

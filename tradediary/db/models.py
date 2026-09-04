@@ -84,6 +84,40 @@ class User(Base):
     accounts: Mapped[list["Account"]] = relationship(back_populates="user")
 
 
+class Sitzung(Base):
+    """Eine offene Anmeldung.
+
+    Serverseitig statt als selbsttragendes Token (JWT), und das ist eine
+    bewusste Wahl: Eine Sitzung, die in der Datenbank steht, lässt sich
+    beenden. Ein JWT gilt bis zum Ablauf, egal was dazwischen passiert --
+    wer sein iPad verliert, kann es nicht zurückrufen.
+
+    Die Marke selbst steht hier nicht, nur ihr Hash. Wer die Datenbank
+    liest, hat damit keine gültige Sitzung in der Hand.
+    """
+
+    __tablename__ = "sessions"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    user_id: Mapped[int] = mapped_column(ForeignKey("users.id"), index=True)
+    #: SHA-256 der Marke. Eindeutig, damit zwei Sitzungen nicht kollidieren.
+    token_hash: Mapped[str] = mapped_column(String(64), unique=True, index=True)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=jetzt
+    )
+    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), index=True)
+    #: Zuletzt benutzt -- damit man in den Einstellungen sieht, welche
+    #: Geräte noch angemeldet sind, und alte gezielt beenden kann.
+    last_seen: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=jetzt
+    )
+    #: Grob, wofür es reicht: "Safari auf dem iPhone". Gekürzt, weil ein
+    #: vollständiger User-Agent nichts hinzufügt, was man lesen will.
+    device: Mapped[str | None] = mapped_column(String(120), default=None)
+
+    user: Mapped["User"] = relationship()
+
+
 class Account(Base):
     """Ein Handelskonto. Ein Prop-Trader hat über die Zeit mehrere."""
 

@@ -19,13 +19,17 @@ from tradediary.db.repository import (
     session_factory,
     trades_neu_berechnen,
 )
+from tradediary.sicherheit import hashe_passwort
 
 from .conftest import close_long, close_short, open_long, open_short
 
 
+PASSWORT = "ein langer satz als passwort"
+
+
 @pytest.fixture()
-def client(tmp_path, monkeypatch):
-    """Eine eigene Datenbank je Test, dazu die App darauf.
+def roh_client(tmp_path, monkeypatch):
+    """Die App auf einer frischen Datenbank -- **ohne** Anmeldung.
 
     Die App liest ihre Datenbank-URL beim Import aus der Umgebung, also
     muss die vor dem Import stehen -- und das Modul darf nicht aus einem
@@ -38,12 +42,21 @@ def client(tmp_path, monkeypatch):
     monkeypatch.setenv("TRADEDIARY_DB", url)
     sys.modules.pop("tradediary.api.main", None)
     main = importlib.import_module("tradediary.api.main")
+    # Die Fehlversuchs-Bremse lebt im Prozessspeicher und überlebt sonst
+    # den Test, der sie ausgelöst hat.
+    main._fehlversuche.clear()
 
     engine = engine_bauen(url)
     schema_anlegen(engine)
     Session_ = session_factory(engine)
     with Session_() as s:
-        s.add(db.User(id=1, email="test@example.invalid", password_hash="x"))
+        s.add(
+            db.User(
+                id=1,
+                email="test@example.invalid",
+                password_hash=hashe_passwort(PASSWORT),
+            )
+        )
         s.add(db.Account(id=1, user_id=1, label="Testkonto"))
         s.commit()
         deals_speichern(
@@ -60,9 +73,50 @@ def client(tmp_path, monkeypatch):
 
     with TestClient(main.app) as c:
         c.session_factory = Session_  # type: ignore[attr-defined]
+        c.main = main  # type: ignore[attr-defined]
         yield c
 
     sys.modules.pop("tradediary.api.main", None)
+
+
+@pytest.fixture()
+def client(roh_client):
+    """Derselbe Client, angemeldet.
+
+    Der TestClient führt Cookies mit, also reicht eine Anmeldung für alle
+    folgenden Aufrufe -- genau wie im Browser.
+    """
+    antwort = roh_client.post(
+        "/api/auth/login",
+        json={"email": "test@example.invalid", "password": PASSWORT},
+    )
+    assert antwort.status_code == 200, antwort.text
+    return roh_client
+
+
+def zweiter_nutzer(client, email="fremd@example.invalid"):
+    """Legt einen zweiten Nutzer mit eigenem Konto und Trade an.
+
+    Für die Frage, die mit der Anmeldung überhaupt erst entsteht: Sieht
+    einer die Daten des anderen?
+    """
+    with client.session_factory() as s:  # type: ignore[attr-defined]
+        s.add(db.User(id=2, email=email, password_hash=hashe_passwort(PASSWORT)))
+        s.add(db.Account(id=2, user_id=2, label="Fremdkonto"))
+        s.commit()
+        deals_speichern(
+            s,
+            2,
+            [
+                open_long(11, 500, "1.00", "1.07000", 0),
+                close_long(12, 500, "1.00", "1.07500", 30, profit=500),
+            ],
+        )
+        trades_neu_berechnen(s, 2)
+        fremder_trade = s.scalars(
+            select(db.Trade).where(db.Trade.account_id == 2)
+        ).one()
+        return {"account_id": 2, "trade_id": fremder_trade.id}
 
 
 def _erste_id(client) -> int:

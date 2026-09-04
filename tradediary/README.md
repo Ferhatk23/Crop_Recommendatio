@@ -3,8 +3,8 @@
 Ein Trading-Journal nach dem Vorbild von TradeZella: Trades laufen automatisch
 aus MT5 ein, die Auswertung liegt als Web-App auf Mac, iPad und iPhone.
 
-**Stand.** Kern, Datenbank, API und Oberfläche stehen und laufen gegen einen
-Beispiel-Datenbestand. Was noch fehlt, steht unten unter
+**Stand.** Kern, Datenbank, API, Anmeldung und Oberfläche stehen und laufen
+gegen einen Beispiel-Datenbestand. Was noch fehlt, steht unten unter
 [Was noch nicht da ist](#was-noch-nicht-da-ist) — vollständig und ohne
 Beschönigung.
 
@@ -37,8 +37,9 @@ tradediary/
 ├── db/
 │   ├── models.py      # SQLAlchemy-Schema
 │   └── repository.py  # Speichern, Neuberechnen, Lesen
+├── sicherheit.py      # Passwörter (scrypt) und Sitzungsmarken
 ├── api/
-│   └── main.py        # FastAPI
+│   └── main.py        # FastAPI, Anmeldung, Zugriffsschutz
 └── demo/
     └── seed.py        # Beispieldaten, die sich wie echte benehmen
 
@@ -186,17 +187,106 @@ Einheiten-Umschalter (€ / R / % / Pips) jede Zahl auf dem Bildschirm aus
 derselben Quelle umrechnen. Fehlt die Bezugsgröße — kein Risiko, also kein R —
 steht ein Strich, keine geschätzte Zahl.
 
+## Anmeldung
+
+Serverseitige Sitzungen in einem HttpOnly-Cookie. Vier Entscheidungen, die
+man an der Umsetzung sieht:
+
+- **`scrypt` aus der Standardbibliothek**, ohne zusätzliche Abhängigkeit. Ein
+  speicherhartes Verfahren mit ~96 ms je Prüfung: für eine Anmeldung nicht
+  spürbar, für das Durchprobieren von Passwortlisten teuer. Die Parameter
+  stehen im Hash mit drin, also lassen sie sich später erhöhen, ohne alte
+  Hashes ungültig zu machen.
+- **HttpOnly-Cookie statt `localStorage`.** JavaScript kommt an die Marke
+  nicht heran, kann sie also auch nicht ausleiten.
+- **Sitzungen in der Datenbank, kein JWT.** Eine Sitzung lässt sich beenden.
+  Ein JWT gilt bis zum Ablauf — wer sein iPad verliert, kann es nicht
+  zurückrufen. `/api/auth/sessions` listet die offenen, `DELETE` beendet eine.
+- **In der Datenbank steht nur der Hash der Marke.** Wer die Datenbank liest,
+  hat damit keine gültige Sitzung in der Hand — so wie er mit den
+  Passwort-Hashes noch kein Passwort hat.
+
+Dazu: gleiche Antwort und gleiche Laufzeit für „E-Mail gibt es nicht" und
+„Passwort falsch" (sonst ließen sich vorhandene Adressen abfragen), und eine
+einfache Bremse nach acht Fehlversuchen in 15 Minuten.
+
+Es gibt **keine Registrierung und kein „Passwort vergessen" im Browser**. Ein
+offenes Anmeldeformular im Netz ist eine Einladung, und ein Zurücksetzen per
+Mail wäre bei Selbstbetrieb die unsicherste Stelle im ganzen Aufbau. Beides
+läuft am Rechner:
+
+```bash
+python scripts/nutzer.py anlegen ferhat@example.com
+python scripts/nutzer.py passwort ferhat@example.com   # beendet alle Sitzungen
+python scripts/nutzer.py abmelden ferhat@example.com
+python scripts/nutzer.py liste
+```
+
+### Wem gehören die Daten
+
+Mit der Anmeldung entsteht eine Frage, die es vorher nicht gab: Sieht ein
+Nutzer die Daten eines anderen? Die Antwort hängt an einer einzigen Stelle —
+`filter_aus_query` prüft das angefragte Konto und setzt sonst die Liste der
+eigenen. Ein Endpunkt, der den Filter benutzt, kann die Prüfung nicht
+vergessen.
+
+Das war nötig, weil vorher genau das schieflag: `/api/accounts` gab *jedes*
+Konto in der Datenbank zurück, `/api/trades` ohne `account_id` alle Trades,
+`/api/tags` die Tags aller Nutzer. Mit einem einzigen Nutzer sah alles
+richtig aus. `tests/test_api_anmeldung.py` hält beide Fragen fest: 17
+Endpunkte antworten ohne Anmeldung mit 401, und ein zweiter Nutzer kommt an
+nichts heran.
+
 ## Loslegen
 
 ```bash
 # Kern und API
 pip install -e ".[dev]"
-python scripts/seed_db.py                     # Beispieldaten anlegen
+python scripts/seed_db.py                     # Beispieldaten + Zugang
 python -m uvicorn tradediary.api.main:app --port 8000
 
 # Oberfläche
 cd web && npm install && npm run dev          # http://localhost:3000
 ```
+
+`seed_db.py` gibt ein **zufälliges** Passwort aus, einmal. Es steht nirgends
+im Quelltext: Standardpasswörter sind der häufigste Weg, auf dem
+selbstbetriebene Software übernommen wird. Verloren? `scripts/nutzer.py
+passwort <email>`.
+
+### Im Heimnetz erreichbar machen
+
+```bash
+export TRADEDIARY_CORS="http://192.168.1.42:3000"   # IP des Ubuntu-Rechners
+python -m uvicorn tradediary.api.main:app --host 0.0.0.0 --port 8000
+cd web && NEXT_PUBLIC_API_BASE="http://192.168.1.42:8000" npm run dev -- -H 0.0.0.0
+```
+
+Dann `http://192.168.1.42:3000` vom Mac und vom iPad. **Nur im eigenen WLAN** —
+keine Portfreigabe im Router, solange kein TLS davor steht: Ohne HTTPS gehen
+Passwort und Sitzungs-Cookie im Klartext über die Leitung.
+
+### Ins Internet
+
+Nicht direkt, sondern hinter einen Reverse Proxy mit TLS (Caddy nimmt einem
+das Zertifikat ab). Dann gehört gesetzt:
+
+```bash
+export TRADEDIARY_COOKIE_SECURE=true      # Cookie nur noch über HTTPS
+export TRADEDIARY_CORS="https://journal.example.com"
+```
+
+`TRADEDIARY_COOKIE_SECURE` steht standardmäßig auf `false`, weil das Cookie
+sonst im Heimnetz über `http://` nie gesetzt würde — und die Anmeldung
+fehlschlüge, ohne dass irgendwo etwas rot wird.
+
+| Umgebungsvariable | Standard | Wofür |
+|---|---|---|
+| `TRADEDIARY_DB` | `sqlite:///tradediary.db` | Datenbank; für Postgres die URL |
+| `TRADEDIARY_CORS` | localhost/127.0.0.1 :3000,:3001 | erlaubte Ursprünge, kommagetrennt |
+| `TRADEDIARY_COOKIE_SECURE` | `false` | auf `true`, sobald HTTPS steht |
+| `TRADEDIARY_COOKIE_SAMESITE` | `lax` | nur ändern, wenn Oberfläche und API auf verschiedenen Domains liegen |
+| `NEXT_PUBLIC_API_BASE` | `http://127.0.0.1:8000` | wohin die Oberfläche fragt |
 
 ## Tests
 
@@ -217,9 +307,12 @@ Auflösung nach.
 ### Die Oberfläche im Browser prüfen
 
 ```bash
-cd web && node tools/pruefe-oberflaeche.mjs            # Darstellung
-cd web && node tools/pruefe-oberflaeche.mjs --bilder   # zusätzlich Screenshots
-cd web && node tools/pruefe-schreiben.mjs              # Speichern und Wiederfinden
+cd web
+export TD_EMAIL=… TD_PASSWORT=…        # aus der Ausgabe von seed_db.py
+node tools/pruefe-anmeldung.mjs        # Anmeldung, Cookie, Abmelden
+node tools/pruefe-oberflaeche.mjs      # Darstellung auf drei Breiten
+node tools/pruefe-schreiben.mjs        # Speichern und Wiederfinden
+node tools/pruefe-oberflaeche.mjs --bilder   # zusätzlich Screenshots
 ```
 
 Braucht Playwright (`npm install --no-save playwright`) und eine laufende
@@ -260,14 +353,15 @@ Damit der Stand nicht besser klingt, als er ist:
   bearbeiten — und die Regel-Häkchen je Trade werden noch nicht gespeichert.
 - **Einstellungen und Einrichtung.** Konten, Limits und Spaltenzuordnung für
   den CSV-Import stehen nur in der Datenbank, nicht in der Oberfläche.
-- **Login.** Es gibt ein `User`-Schema, aber keine Anmeldung. Bis die steht,
-  darf die App nicht offen im Netz stehen.
-- **Deployment.**
+- **Deployment.** Die Umgebungsvariablen sind da und dokumentiert, aber es
+  gibt keine Dienst-Datei, kein Container-Abbild und keine Proxy-Konfiguration
+  zum Übernehmen.
+- **Zwei-Faktor-Anmeldung.** Für ein Konto, das ins Internet zeigt, wäre sie
+  angebracht; für den Betrieb im Heimnetz ist sie es nicht.
 
 ## Als Nächstes
 
 1. **MT5-Sammler** unter Wine. Bewusst ohne Logik: Er liest die Historie und
    schickt JSON. Was dort nicht steht, kann dort nicht kaputtgehen.
-2. **Login und Deployment.** Ohne Anmeldung darf die App nicht offen im Netz
-   stehen — das ist die Bedingung, bevor sie vom iPad aus erreichbar wird.
+2. **Deployment**: systemd-Dienste für API und Oberfläche, Caddy davor.
 3. **Playbook-Seiten** samt Regel-Häkchen je Trade.

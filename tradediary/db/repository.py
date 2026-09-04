@@ -314,6 +314,7 @@ def zeilen_laden(
     bis: datetime | None = None,
     symbol: str | None = None,
     direction: str | None = None,
+    account_ids: list[int] | None = None,
 ) -> list[db.Trade]:
     """Die gefilterten Trades als Datenbankzeilen.
 
@@ -321,8 +322,17 @@ def zeilen_laden(
     Nutzers, keine des Handels. Wer danach auswerten will, braucht die
     Zeile; wer rechnen will, den Kern. Deshalb zwei Wege auf dieselbe
     Abfrage statt einer Dataclass, die beides vermischt.
+
+    `account_ids` ist die Berechtigungsschranke, `account_id` der Filter.
+    Zwei Begriffe, weil es zwei Dinge sind: Der Nutzer *darf* seine drei
+    Konten sehen und *möchte* gerade eines davon. Eine leere Liste heißt
+    "keins" und liefert nichts -- niemals versehentlich alles.
     """
     frage = select(db.Trade)
+    if account_ids is not None:
+        if not account_ids:
+            return []
+        frage = frage.where(db.Trade.account_id.in_(account_ids))
     if account_id is not None:
         frage = frage.where(db.Trade.account_id == account_id)
     if von is not None:
@@ -344,10 +354,13 @@ def trades_laden(
     bis: datetime | None = None,
     symbol: str | None = None,
     direction: str | None = None,
+    account_ids: list[int] | None = None,
 ) -> list[KernTrade]:
     return [
         trade_zu_kern(z)
-        for z in zeilen_laden(session, account_id, von, bis, symbol, direction)
+        for z in zeilen_laden(
+            session, account_id, von, bis, symbol, direction, account_ids
+        )
     ]
 
 

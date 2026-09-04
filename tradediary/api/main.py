@@ -20,12 +20,13 @@ import os
 from datetime import date, datetime, timedelta, timezone
 from decimal import Decimal
 
-from fastapi import Depends, FastAPI, HTTPException, Query
+from fastapi import Depends, FastAPI, HTTPException, Query, Request, Response
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from sqlalchemy import delete, func, select
 from sqlalchemy.orm import Session
 
+from .. import sicherheit
 from ..core import instruments, metrics as kern_metrics, rules, score as kern_score
 from ..core.metrics import daily_pnl
 from ..core.models import Outcome
@@ -77,12 +78,279 @@ def hole_session():
 
 
 # ---------------------------------------------------------------------------
+# Anmeldung
+# ---------------------------------------------------------------------------
+#
+# Serverseitige Sitzungen in einem HttpOnly-Cookie. Drei Entscheidungen,
+# die man an der Umsetzung sieht:
+#
+# * **HttpOnly.** Die Marke steht nicht im `localStorage`, sondern in
+#   einem Cookie, das JavaScript nicht lesen kann. Ein eingeschleustes
+#   Skript kann damit zwar noch Anfragen stellen, aber die Marke nicht
+#   ausleiten und nicht anderswo weiterverwenden.
+# * **Serverseitig statt JWT.** Eine Sitzung in der Datenbank lässt sich
+#   beenden. Ein JWT gilt bis zum Ablauf -- wer sein iPad verliert, kann
+#   es nicht zurückrufen.
+# * **Gleiche Antwort für falsche E-Mail und falsches Passwort**, und
+#   gleiche Laufzeit dazu. Sonst ließe sich herausfinden, welche Adressen
+#   es gibt, ohne ein einziges Passwort zu erraten.
+
+COOKIE = "tradediary_sitzung"
+
+#: Wie lange eine Anmeldung hält. Lang, und das ist Absicht: Das hier ist
+#: ein persönliches Journal auf dem eigenen Telefon. Wer sich jeden Tag
+#: neu anmelden muss, schaut seltener hinein -- und ein Journal, in das
+#: man nicht schaut, ist wertlos. Die Sitzung lässt sich jederzeit
+#: beenden, das ist der Ausgleich.
+SITZUNGSDAUER = timedelta(days=30)
+
+#: Ab wann die Restlaufzeit beim Benutzen wieder aufgefüllt wird. Ohne
+#: das würde man nach genau 30 Tagen mitten im Betrieb ausgeloggt.
+VERLAENGERN_AB = timedelta(days=7)
+
+#: `Secure` verlangt HTTPS. Im Heimnetz läuft die App auf http://, dort
+#: würde das Cookie sonst nie gesetzt -- und die Anmeldung schlüge fehl,
+#: ohne dass irgendwo etwas rot wird. Beim Veröffentlichen mit TLS gehört
+#: der Wert auf `true`.
+COOKIE_SECURE = os.environ.get("TRADEDIARY_COOKIE_SECURE", "false").lower() == "true"
+COOKIE_SAMESITE = os.environ.get("TRADEDIARY_COOKIE_SAMESITE", "lax")
+
+#: Einfache Bremse gegen das Durchprobieren von Passwörtern.
+#:
+#: Im Prozessspeicher, nicht in der Datenbank: Bei einem Neustart ist sie
+#: weg, und bei mehreren Arbeitsprozessen zählt jeder für sich. Für eine
+#: selbstbetriebene App mit einem Nutzer reicht das und kostet nichts.
+#: Wer sie ernsthaft braucht, gehört hinter einen Reverse Proxy, der das
+#: besser kann.
+ANMELDE_VERSUCHE = 8
+ANMELDE_FENSTER = timedelta(minutes=15)
+_fehlversuche: dict[str, list[datetime]] = {}
+
+
+def _zu_viele_versuche(kennung: str) -> bool:
+    jetzt = datetime.now(timezone.utc)
+    versuche = [
+        z for z in _fehlversuche.get(kennung, []) if jetzt - z < ANMELDE_FENSTER
+    ]
+    _fehlversuche[kennung] = versuche
+    return len(versuche) >= ANMELDE_VERSUCHE
+
+
+def _versuch_vermerken(kennung: str) -> None:
+    _fehlversuche.setdefault(kennung, []).append(datetime.now(timezone.utc))
+
+
+def _geraet(request: Request) -> str | None:
+    """Grob, wofür es reicht -- nicht der vollständige User-Agent."""
+    ua = request.headers.get("user-agent", "")
+    if not ua:
+        return None
+    for muster, name in (
+        ("iPhone", "iPhone"),
+        ("iPad", "iPad"),
+        ("Macintosh", "Mac"),
+        ("Android", "Android"),
+        ("Windows", "Windows"),
+        ("Linux", "Linux"),
+    ):
+        if muster in ua:
+            return name
+    return ua[:60]
+
+
+def aktueller_nutzer(
+    request: Request, session: Session = Depends(hole_session)
+) -> db.User:
+    """Der angemeldete Nutzer. 401, wenn keiner.
+
+    Jeder Endpunkt mit Daten hängt daran. Das ist bewusst keine Option
+    mit Standardwert: Ein Endpunkt, der die Abhängigkeit vergisst, fällt
+    beim Test auf, weil er dann ohne Anmeldung antwortet -- und genau das
+    prüfen die Tests.
+    """
+    marke = request.cookies.get(COOKIE)
+    if not marke:
+        raise HTTPException(401, "Nicht angemeldet")
+
+    sitzung = session.scalars(
+        select(db.Sitzung).where(db.Sitzung.token_hash == sicherheit.marken_hash(marke))
+    ).first()
+    if sitzung is None:
+        raise HTTPException(401, "Nicht angemeldet")
+
+    ablauf = sitzung.expires_at
+    if ablauf.tzinfo is None:
+        ablauf = ablauf.replace(tzinfo=timezone.utc)
+
+    jetzt = datetime.now(timezone.utc)
+    if ablauf <= jetzt:
+        session.delete(sitzung)
+        session.commit()
+        raise HTTPException(401, "Sitzung abgelaufen")
+
+    # Restlaufzeit auffüllen, wenn sie zur Neige geht.
+    if ablauf - jetzt < SITZUNGSDAUER - VERLAENGERN_AB:
+        sitzung.expires_at = jetzt + SITZUNGSDAUER
+    sitzung.last_seen = jetzt
+    session.commit()
+
+    nutzer = session.get(db.User, sitzung.user_id)
+    if nutzer is None:
+        raise HTTPException(401, "Nicht angemeldet")
+    return nutzer
+
+
+class Anmeldung(BaseModel):
+    email: str
+    password: str
+
+
+def _nutzer_block(nutzer: db.User) -> dict:
+    return {"id": nutzer.id, "email": nutzer.email}
+
+
+@app.post("/api/auth/login")
+def anmelden(
+    daten: Anmeldung,
+    request: Request,
+    antwort: Response,
+    session: Session = Depends(hole_session),
+):
+    email = daten.email.strip().lower()
+
+    if _zu_viele_versuche(email):
+        raise HTTPException(
+            429,
+            "Zu viele Fehlversuche. Bitte in einigen Minuten noch einmal versuchen.",
+        )
+
+    nutzer = session.scalars(
+        select(db.User).where(func.lower(db.User.email) == email)
+    ).first()
+
+    # Gibt es die Adresse nicht, wird trotzdem gerechnet -- sonst wäre die
+    # Antwort für unbekannte Adressen messbar schneller.
+    if nutzer is None:
+        sicherheit.blindprüfung(daten.password)
+        _versuch_vermerken(email)
+        raise HTTPException(401, "E-Mail oder Passwort stimmt nicht")
+
+    if not sicherheit.pruefe_passwort(daten.password, nutzer.password_hash):
+        _versuch_vermerken(email)
+        raise HTTPException(401, "E-Mail oder Passwort stimmt nicht")
+
+    _fehlversuche.pop(email, None)
+
+    marke = sicherheit.neue_marke()
+    session.add(
+        db.Sitzung(
+            user_id=nutzer.id,
+            token_hash=marke.hash,
+            expires_at=datetime.now(timezone.utc) + SITZUNGSDAUER,
+            device=_geraet(request),
+        )
+    )
+    session.commit()
+
+    antwort.set_cookie(
+        COOKIE,
+        marke.klartext,
+        max_age=int(SITZUNGSDAUER.total_seconds()),
+        httponly=True,
+        secure=COOKIE_SECURE,
+        samesite=COOKIE_SAMESITE,
+        path="/",
+    )
+    return _nutzer_block(nutzer)
+
+
+@app.post("/api/auth/logout")
+def abmelden(
+    request: Request, antwort: Response, session: Session = Depends(hole_session)
+):
+    """Beendet die Sitzung -- auch die in der Datenbank.
+
+    Nur das Cookie zu löschen reichte nicht: Wer die Marke vorher
+    abgegriffen hat, könnte sie weiter verwenden.
+    """
+    marke = request.cookies.get(COOKIE)
+    if marke:
+        sitzung = session.scalars(
+            select(db.Sitzung).where(
+                db.Sitzung.token_hash == sicherheit.marken_hash(marke)
+            )
+        ).first()
+        if sitzung is not None:
+            session.delete(sitzung)
+            session.commit()
+
+    antwort.delete_cookie(COOKIE, path="/")
+    return {"status": "abgemeldet"}
+
+
+@app.get("/api/auth/me")
+def wer_bin_ich(nutzer: db.User = Depends(aktueller_nutzer)):
+    return _nutzer_block(nutzer)
+
+
+@app.get("/api/auth/sessions")
+def sitzungen(
+    nutzer: db.User = Depends(aktueller_nutzer),
+    session: Session = Depends(hole_session),
+):
+    """Die offenen Anmeldungen -- damit man ein verlorenes Gerät abmelden kann."""
+    zeilen = session.scalars(
+        select(db.Sitzung)
+        .where(db.Sitzung.user_id == nutzer.id)
+        .order_by(db.Sitzung.last_seen.desc())
+    ).all()
+    return [
+        {
+            "id": s.id,
+            "device": s.device,
+            "created_at": _iso(s.created_at),
+            "last_seen": _iso(s.last_seen),
+            "expires_at": _iso(s.expires_at),
+        }
+        for s in zeilen
+    ]
+
+
+@app.delete("/api/auth/sessions/{sitzung_id}")
+def sitzung_beenden(
+    sitzung_id: int,
+    nutzer: db.User = Depends(aktueller_nutzer),
+    session: Session = Depends(hole_session),
+):
+    zeile = session.get(db.Sitzung, sitzung_id)
+    # Dieselbe Antwort für "gibt es nicht" und "gehört jemand anderem":
+    # Sonst ließe sich durch Probieren zählen, wie viele Sitzungen es gibt.
+    if zeile is None or zeile.user_id != nutzer.id:
+        raise HTTPException(404, "Sitzung nicht gefunden")
+    session.delete(zeile)
+    session.commit()
+    return {"status": "beendet"}
+
+
+# ---------------------------------------------------------------------------
 # Hilfen
 # ---------------------------------------------------------------------------
 
 def z(wert: Decimal | float | None) -> float | None:
     """Decimal zu JSON-Zahl. `None` bleibt `None` -- das ist der Punkt."""
     return None if wert is None else float(wert)
+
+
+def _iso(zeit: datetime | None) -> str | None:
+    """Zeitstempel als ISO-Text, immer mit Zeitzone.
+
+    SQLite gibt naive Zeitstempel zurück. Ohne das `Z` läse der Browser
+    sie als Ortszeit -- und eine Sitzung sähe je nach Zeitzone abgelaufen
+    aus oder um Stunden zu lang.
+    """
+    if zeit is None:
+        return None
+    return (zeit if zeit.tzinfo else zeit.replace(tzinfo=timezone.utc)).isoformat()
 
 
 def zeitraum(
@@ -111,16 +379,77 @@ class Filter(BaseModel):
     direction: str | None = None
 
 
+def eigene_konten(session: Session, nutzer: db.User) -> list[int]:
+    """Die Konten-IDs des Nutzers."""
+    return list(
+        session.scalars(
+            select(db.Account.id).where(db.Account.user_id == nutzer.id)
+        ).all()
+    )
+
+
+def pruefe_konto(session: Session, nutzer: db.User, account_id: int) -> db.Account:
+    """Holt ein Konto und stellt sicher, dass es dem Nutzer gehört.
+
+    Dieselbe Antwort für "gibt es nicht" und "gehört jemand anderem".
+    Ein 403 wäre die Auskunft, dass das Konto existiert -- und schon das
+    ist mehr, als jemand erfahren soll, der es nicht sehen darf.
+    """
+    konto = session.get(db.Account, account_id)
+    if konto is None or konto.user_id != nutzer.id:
+        raise HTTPException(404, "Konto nicht gefunden")
+    return konto
+
+
+def hole_eigenen_trade(session: Session, nutzer: db.User, trade_id: int) -> db.Trade:
+    """Holt einen Trade und stellt sicher, dass er dem Nutzer gehört.
+
+    Der Weg führt über das Konto: Ein Trade hat keinen Nutzer, ein Konto
+    schon. Wieder dieselbe Antwort für "gibt es nicht" und "gehört jemand
+    anderem" -- sonst ließe sich durch Hochzählen der IDs herausfinden,
+    wie viele Trades andere Nutzer haben.
+    """
+    zeile = session.get(db.Trade, trade_id)
+    if zeile is None:
+        raise HTTPException(404, "Trade nicht gefunden")
+    konto = session.get(db.Account, zeile.account_id)
+    if konto is None or konto.user_id != nutzer.id:
+        raise HTTPException(404, "Trade nicht gefunden")
+    return zeile
+
+
 def filter_aus_query(
     account_id: int | None = Query(None),
     von: str | None = Query(None),
     bis: str | None = Query(None),
     symbol: str | None = Query(None),
     direction: str | None = Query(None),
+    nutzer: db.User = Depends(aktueller_nutzer),
+    session: Session = Depends(hole_session),
 ) -> dict:
+    """Der Filter -- und zugleich die Stelle, an der die Berechtigung hängt.
+
+    Beides zusammen, und das ist Absicht. Vorher war `account_id` ein
+    reiner Filter: Wer ihn wegließ, bekam *alle* Konten -- auch die
+    fremder Nutzer. Solange es nur einen gab, fiel das nicht auf; mit der
+    Anmeldung wäre es ein Berechtigungsfehler geworden.
+
+    Deshalb setzt diese Abhängigkeit immer `account_ids`: Entweder das
+    eine geprüfte Konto oder alle eigenen. Ein Endpunkt, der den Filter
+    benutzt, kann die Prüfung damit nicht vergessen -- und einer, der ihn
+    nicht benutzt, hat auch keine Daten zu schützen.
+    """
     start, ende = zeitraum(von, bis)
+
+    if account_id is not None:
+        pruefe_konto(session, nutzer, account_id)
+        erlaubt = [account_id]
+    else:
+        erlaubt = eigene_konten(session, nutzer)
+
     return {
         "account_id": account_id,
+        "account_ids": erlaubt,
         "von": start,
         "bis": ende,
         "symbol": symbol,
@@ -133,15 +462,31 @@ def filter_aus_query(
 # ---------------------------------------------------------------------------
 
 @app.get("/api/health")
-def health(session: Session = Depends(hole_session)):
-    anzahl = session.scalar(select(func.count()).select_from(db.Trade)) or 0
-    return {"status": "ok", "trades": anzahl}
+def health():
+    """Lebenszeichen -- bewusst ohne Anmeldung und bewusst ohne Zahlen.
+
+    Ein Überwachungsdienst muss wissen, ob die App antwortet. Er muss
+    nicht wissen, wie viele Trades darin stehen: Das war vorher der Fall
+    und verriet einem Unangemeldeten, wie aktiv das Konto ist.
+    """
+    return {"status": "ok"}
 
 
 @app.get("/api/accounts")
-def accounts(session: Session = Depends(hole_session)):
-    """Alle Konten. Prop-Trader haben über die Zeit mehrere."""
-    zeilen = session.scalars(select(db.Account).order_by(db.Account.id)).all()
+def accounts(
+    nutzer: db.User = Depends(aktueller_nutzer),
+    session: Session = Depends(hole_session),
+):
+    """Die Konten des Nutzers. Prop-Trader haben über die Zeit mehrere.
+
+    Hier stand vorher `select(db.Account)` ohne Bedingung -- also *alle*
+    Konten, auch fremde. Mit einem einzigen Nutzer fiel das nicht auf.
+    """
+    zeilen = session.scalars(
+        select(db.Account)
+        .where(db.Account.user_id == nutzer.id)
+        .order_by(db.Account.id)
+    ).all()
     heraus = []
     for a in zeilen:
         zustand = session.get(db.SyncState, a.id)
@@ -366,6 +711,11 @@ def liste(
     session: Session = Depends(hole_session),
 ):
     frage = select(db.Trade)
+    # Erst die Schranke, dann der Filter. Eine leere Liste heißt "keine
+    # Konten" und muss nichts liefern -- nicht alles.
+    if not f["account_ids"]:
+        return {"total": 0, "limit": limit, "offset": offset, "trades": []}
+    frage = frage.where(db.Trade.account_id.in_(f["account_ids"]))
     if f["account_id"]:
         frage = frage.where(db.Trade.account_id == f["account_id"])
     if f["von"]:
@@ -400,10 +750,12 @@ def liste(
 
 
 @app.get("/api/trades/{trade_id}")
-def detail(trade_id: int, session: Session = Depends(hole_session)):
-    zeile = session.get(db.Trade, trade_id)
-    if zeile is None:
-        raise HTTPException(404, "Trade nicht gefunden")
+def detail(
+    trade_id: int,
+    nutzer: db.User = Depends(aktueller_nutzer),
+    session: Session = Depends(hole_session),
+):
+    zeile = hole_eigenen_trade(session, nutzer, trade_id)
 
     ausfuehrungen = session.scalars(
         select(db.Deal)
@@ -443,7 +795,7 @@ def detail(trade_id: int, session: Session = Depends(hole_session)):
 def kalender(
     year: int,
     month: int,
-    account_id: int | None = Query(None),
+    f: dict = Depends(filter_aus_query),
     session: Session = Depends(hole_session),
 ):
     """Tageswerte eines Monats plus Wochensummen.
@@ -455,12 +807,21 @@ def kalender(
     if not 1 <= month <= 12:
         raise HTTPException(400, "Monat muss zwischen 1 und 12 liegen")
 
+    account_id = f["account_id"]
+    erlaubte = f["account_ids"]
+
     start = datetime(year, month, 1, tzinfo=timezone.utc)
     ende = datetime(
         year + (month == 12), (month % 12) + 1, 1, tzinfo=timezone.utc
     ) - timedelta(microseconds=1)
 
-    trades = trades_laden(session, account_id=account_id, von=start, bis=ende)
+    trades = trades_laden(
+        session,
+        account_id=account_id,
+        von=start,
+        bis=ende,
+        account_ids=erlaubte,
+    )
     geschlossen = [t for t in trades if not t.is_open]
 
     pro_tag = daily_pnl(geschlossen)
@@ -673,7 +1034,11 @@ class ImportAnfrage(BaseModel):
 
 
 @app.post("/api/import/csv")
-def csv_import(anfrage: ImportAnfrage, session: Session = Depends(hole_session)):
+def csv_import(
+    anfrage: ImportAnfrage,
+    nutzer: db.User = Depends(aktueller_nutzer),
+    session: Session = Depends(hole_session),
+):
     """Nimmt einen Broker-Export entgegen.
 
     Antwortet mit dem vollständigen Bericht -- auch mit dem, was *nicht*
@@ -683,9 +1048,9 @@ def csv_import(anfrage: ImportAnfrage, session: Session = Depends(hole_session))
     """
     from ..db.repository import aufnehmen
 
-    konto = session.get(db.Account, anfrage.account_id)
-    if konto is None:
-        raise HTTPException(404, "Konto nicht gefunden")
+    # Vor allem anderen: Gehört das Konto überhaupt diesem Nutzer? Ohne
+    # die Prüfung könnte jeder Angemeldete in fremde Konten importieren.
+    pruefe_konto(session, nutzer, anfrage.account_id)
 
     bericht = importiere(
         anfrage.content, account_id=str(anfrage.account_id), zuordnung=anfrage.mapping
@@ -717,11 +1082,15 @@ def csv_import(anfrage: ImportAnfrage, session: Session = Depends(hole_session))
 
 @app.get("/api/symbols")
 def symbole(
-    account_id: int | None = Query(None), session: Session = Depends(hole_session)
+    f: dict = Depends(filter_aus_query), session: Session = Depends(hole_session)
 ):
-    frage = select(db.Trade.symbol).distinct()
-    if account_id:
-        frage = frage.where(db.Trade.account_id == account_id)
+    if not f["account_ids"]:
+        return []
+    frage = select(db.Trade.symbol).distinct().where(
+        db.Trade.account_id.in_(f["account_ids"])
+    )
+    if f["account_id"]:
+        frage = frage.where(db.Trade.account_id == f["account_id"])
     return sorted(session.scalars(frage).all())
 
 
@@ -771,6 +1140,7 @@ def _benutzer_von(session: Session, trade: db.Trade) -> int:
 def trade_aendern(
     trade_id: int,
     aenderung: TradeAenderung,
+    nutzer: db.User = Depends(aktueller_nutzer),
     session: Session = Depends(hole_session),
 ):
     """Notiz und Playbook-Zuordnung setzen.
@@ -778,9 +1148,7 @@ def trade_aendern(
     Nur die Felder, die im Rumpf stehen. `note: null` löscht die Notiz,
     ein fehlendes `note` lässt sie stehen.
     """
-    zeile = session.get(db.Trade, trade_id)
-    if zeile is None:
-        raise HTTPException(404, "Trade nicht gefunden")
+    zeile = hole_eigenen_trade(session, nutzer, trade_id)
 
     gesetzt = aenderung.model_fields_set
 
@@ -819,6 +1187,7 @@ class TagListe(BaseModel):
 def trade_tags_setzen(
     trade_id: int,
     liste: TagListe,
+    nutzer: db.User = Depends(aktueller_nutzer),
     session: Session = Depends(hole_session),
 ):
     """Setzt die Tags eines Trades auf genau diese Liste.
@@ -827,9 +1196,7 @@ def trade_tags_setzen(
     sonst stünde dasselbe Setup unter zwei IDs im Report. Doppelte in der
     Eingabe fallen zusammen.
     """
-    zeile = session.get(db.Trade, trade_id)
-    if zeile is None:
-        raise HTTPException(404, "Trade nicht gefunden")
+    zeile = hole_eigenen_trade(session, nutzer, trade_id)
 
     if len(liste.tags) > 20:
         raise HTTPException(400, "Höchstens 20 Tags je Trade")
@@ -885,6 +1252,7 @@ def tags(
     ungenutzte: bool = Query(
         False, description="Auch Tags mitliefern, die an keinem Trade hängen"
     ),
+    nutzer: db.User = Depends(aktueller_nutzer),
     session: Session = Depends(hole_session),
 ):
     """Die bereits vergebenen Tags -- als Vorschläge beim Tippen.
@@ -902,12 +1270,11 @@ def tags(
     tippt, bekommt dieselbe Marke wieder, und die alte Zuordnung im
     Report bleibt unberührt.
     """
-    user_id = None
+    # Immer der angemeldete Nutzer -- vorher hing das am `account_id`, und
+    # ohne den kamen die Tags *aller* Nutzer zurück.
     if account_id:
-        konto = session.get(db.Account, account_id)
-        if konto is None:
-            raise HTTPException(404, "Konto nicht gefunden")
-        user_id = konto.user_id
+        pruefe_konto(session, nutzer, account_id)
+    user_id = nutzer.id
 
     frage = (
         select(db.Tag, func.count(db.TradeTag.trade_id))
@@ -940,6 +1307,7 @@ class JournalEingabe(BaseModel):
 def journal_lesen(
     tag: str,
     account_id: int = Query(...),
+    nutzer: db.User = Depends(aktueller_nutzer),
     session: Session = Depends(hole_session),
 ):
     """Die Tagesnotiz. Fehlt sie, kommt eine leere zurück, kein 404.
@@ -952,6 +1320,8 @@ def journal_lesen(
         datum = date.fromisoformat(tag)
     except ValueError:
         raise HTTPException(400, f"Datum nicht lesbar: {tag}")
+
+    pruefe_konto(session, nutzer, account_id)
 
     eintrag = session.scalars(
         select(db.JournalEntry).where(
@@ -977,6 +1347,7 @@ def journal_schreiben(
     tag: str,
     eingabe: JournalEingabe,
     account_id: int = Query(...),
+    nutzer: db.User = Depends(aktueller_nutzer),
     session: Session = Depends(hole_session),
 ):
     """Tagesnotiz und Stimmung setzen."""
@@ -985,8 +1356,7 @@ def journal_schreiben(
     except ValueError:
         raise HTTPException(400, f"Datum nicht lesbar: {tag}")
 
-    if session.get(db.Account, account_id) is None:
-        raise HTTPException(404, "Konto nicht gefunden")
+    pruefe_konto(session, nutzer, account_id)
 
     text = eingabe.body.strip()
     if len(text) > 50_000:
@@ -1021,15 +1391,18 @@ def journal_schreiben(
 
 @app.get("/api/playbooks")
 def playbooks(
-    account_id: int | None = Query(None), session: Session = Depends(hole_session)
+    account_id: int | None = Query(None),
+    nutzer: db.User = Depends(aktueller_nutzer),
+    session: Session = Depends(hole_session),
 ):
     """Die Playbooks samt Regeln -- für die Auswahl am Trade."""
-    frage = select(db.Playbook).order_by(db.Playbook.name)
     if account_id:
-        konto = session.get(db.Account, account_id)
-        if konto is None:
-            raise HTTPException(404, "Konto nicht gefunden")
-        frage = frage.where(db.Playbook.user_id == konto.user_id)
+        pruefe_konto(session, nutzer, account_id)
+    frage = (
+        select(db.Playbook)
+        .where(db.Playbook.user_id == nutzer.id)
+        .order_by(db.Playbook.name)
+    )
 
     return [
         {

@@ -248,9 +248,28 @@ function query(params: Record<string, unknown>): string {
   return text ? `?${text}` : '';
 }
 
+/**
+ * Wird geworfen, wenn die Anmeldung fehlt oder abgelaufen ist.
+ *
+ * Eine eigene Klasse, keine Zeichenkette: Der Aufrufer muss diesen Fall
+ * von einem echten Fehler unterscheiden können. „Nicht angemeldet" ist
+ * kein Defekt, sondern ein Zustand — und gehört auf die Anmeldeseite,
+ * nicht in eine rote Fehlermeldung.
+ */
+export class NichtAngemeldet extends Error {
+  constructor(nachricht = 'Nicht angemeldet') {
+    super(nachricht);
+    this.name = 'NichtAngemeldet';
+  }
+}
+
 async function hole<T>(pfad: string, init?: RequestInit): Promise<T> {
   const antwort = await fetch(`${API_BASE}${pfad}`, {
     cache: 'no-store',
+    // Ohne das schickt der Browser das Sitzungs-Cookie bei einer
+    // Anfrage an einen anderen Ursprung nicht mit — und die App wäre
+    // dauerhaft abgemeldet, obwohl die Anmeldung geklappt hat.
+    credentials: 'include',
     ...init,
   });
   if (!antwort.ok) {
@@ -261,12 +280,46 @@ async function hole<T>(pfad: string, init?: RequestInit): Promise<T> {
     } catch {
       /* Antwort war kein JSON — die Statuszeile muss reichen. */
     }
+    if (antwort.status === 401) throw new NichtAngemeldet(text);
     throw new Error(text);
   }
   return antwort.json() as Promise<T>;
 }
 
+export interface Nutzer {
+  id: number;
+  email: string;
+}
+
+export interface Sitzung {
+  id: number;
+  device: string | null;
+  created_at: string | null;
+  last_seen: string | null;
+  expires_at: string | null;
+}
+
 export const api = {
+  /* --- Anmeldung ------------------------------------------------------ */
+
+  anmelden: (email: string, password: string) =>
+    hole<Nutzer>('/api/auth/login', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ email, password }),
+    }),
+
+  abmelden: () => hole<{ status: string }>('/api/auth/logout', { method: 'POST' }),
+
+  ich: () => hole<Nutzer>('/api/auth/me'),
+
+  sitzungen: () => hole<Sitzung[]>('/api/auth/sessions'),
+
+  sitzung_beenden: (id: number) =>
+    hole<{ status: string }>(`/api/auth/sessions/${id}`, { method: 'DELETE' }),
+
+  /* --- Daten ---------------------------------------------------------- */
+
   accounts: () => hole<Account[]>('/api/accounts'),
 
   overview: (f: Filters) => hole<Overview>(`/api/overview${query({ ...f })}`),

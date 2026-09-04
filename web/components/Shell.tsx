@@ -15,6 +15,7 @@
 
 import Link from 'next/link';
 import { usePathname } from 'next/navigation';
+import { Anmeldung } from './Anmeldung';
 import { useApp } from './AppState';
 import { SyncHeartbeat, TagChip } from './primitives';
 import { UNITS } from '../lib/format';
@@ -219,8 +220,23 @@ export function FilterBar({ symbole = [] }: { symbole?: string[] }) {
 }
 
 export function Shell({ children }: { children: React.ReactNode }) {
-  const { account, theme, toggleTheme, laden, fehler } = useApp();
+  const { account, theme, toggleTheme, laden, fehler, angemeldet, nutzer, abmelden } =
+    useApp();
   const pfad = usePathname();
+
+  // Solange unklar ist, wer da ist, wird nichts gezeigt. Ein kurzes
+  // Aufblitzen der Anmeldeseite bei jedem Neuladen waere schlimmer als
+  // ein Sekundenbruchteil Leere -- es saehe jedes Mal so aus, als waere
+  // man rausgeflogen.
+  if (laden) {
+    return (
+      <main style={{ padding: 24, color: 'var(--td-neutral)', fontSize: 12 }}>
+        lädt …
+      </main>
+    );
+  }
+
+  if (!angemeldet) return <Anmeldung />;
 
   if (fehler) {
     return (
@@ -276,6 +292,21 @@ export function Shell({ children }: { children: React.ReactNode }) {
             }}
           >
             {theme === 'dark' ? '☀ Hell' : '☾ Dunkel'}
+          </button>
+          <button
+            onClick={() => void abmelden()}
+            className="td-tap nur-breit"
+            title={nutzer?.email ?? undefined}
+            style={{
+              width: '100%',
+              fontSize: 11,
+              color: 'var(--td-neutral)',
+              borderTop: '1px solid var(--td-line)',
+              textAlign: 'left',
+              paddingLeft: 0,
+            }}
+          >
+            ⏻ Abmelden
           </button>
         </div>
       </aside>

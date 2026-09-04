@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import os
+import secrets
 import sys
 from decimal import Decimal as D
 
@@ -11,8 +12,10 @@ from tradediary.db import models as m
 from tradediary.db.repository import (aufnehmen, engine_bauen, schema_anlegen,
                                       session_factory)
 from tradediary.demo.seed import erzeuge_deals
+from tradediary.sicherheit import hashe_passwort
 
 URL = os.environ.get("TRADEDIARY_DB", "sqlite:///tradediary.db")
+EMAIL = os.environ.get("TRADEDIARY_DEMO_EMAIL", "demo@tradediary.local")
 
 
 def main() -> None:
@@ -25,8 +28,16 @@ def main() -> None:
     schema_anlegen(engine)
     Session = session_factory(engine)
 
+    # Ein zufaelliges Passwort, einmal ausgegeben -- kein festes im Repo.
+    #
+    # Standardpasswoerter sind der haeufigste Weg, auf dem selbstbetriebene
+    # Software uebernommen wird: Sie stehen im oeffentlichen Quelltext,
+    # jeder kennt sie, und niemand aendert sie. Wer dieses hier verliert,
+    # setzt ein neues: scripts/nutzer.py passwort <email>
+    passwort = secrets.token_urlsafe(12)
+
     with Session() as s:
-        user = m.User(email="ferhat@example.com", password_hash="!dev")
+        user = m.User(email=EMAIL, password_hash=hashe_passwort(passwort))
         s.add(user)
         s.flush()
 
@@ -99,6 +110,12 @@ def main() -> None:
 
         gesamt = s.query(m.Trade).count()
         print(f"\nFertig: {gesamt} Trades in {pfad}")
+        print("\n" + "=" * 58)
+        print("  Anmeldung -- dieses Passwort steht nirgendwo sonst:")
+        print(f"    E-Mail:   {EMAIL}")
+        print(f"    Passwort: {passwort}")
+        print("=" * 58)
+        print("  Neues setzen: python scripts/nutzer.py passwort <email>")
 
 
 def verteile_beschriftungen(s, marken, pb, setups, fehler, emotionen) -> None:

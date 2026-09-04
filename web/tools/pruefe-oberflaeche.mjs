@@ -16,10 +16,14 @@
  * Rückgabewert 1, wenn eine davon bricht -- damit ein Fehlschlag nicht
  * bloß in der Ausgabe steht, sondern auch auffällt.
  *
- *   node tools/pruefe-oberflaeche.mjs            # prüfen
- *   node tools/pruefe-oberflaeche.mjs --bilder   # zusätzlich Screenshots
+ *   TD_EMAIL=… TD_PASSWORT=… node tools/pruefe-oberflaeche.mjs
+ *   TD_EMAIL=… TD_PASSWORT=… node tools/pruefe-oberflaeche.mjs --bilder
  *
  * Voraussetzung: `npm run dev` läuft, und die API antwortet.
+ *
+ * Angemeldet wird einmal, dann teilen sich alle Kontexte den Zustand:
+ * Seit es eine Anmeldung gibt, zeigt jede Seite ohne sie nur das
+ * Anmeldeformular -- und geprüft würde dann fünfmal dasselbe Formular.
  */
 
 import fs from 'node:fs';
@@ -60,9 +64,45 @@ try {
 const fehler = [];
 const melde = (wo, text) => fehler.push(`${wo}: ${text}`);
 
+const EMAIL = process.env.TD_EMAIL;
+const PASSWORT = process.env.TD_PASSWORT;
+if (!EMAIL || !PASSWORT) {
+  console.error(
+    'TD_EMAIL und TD_PASSWORT setzen (aus der Ausgabe von scripts/seed_db.py).',
+  );
+  process.exit(2);
+}
+
 const browser = await chromium.launch(
   CHROME ? { executablePath: CHROME } : {},
 );
+
+/**
+ * Meldet sich einmal an und gibt den Sitzungszustand zurück.
+ *
+ * Der wird an jeden weiteren Kontext gereicht -- sonst müsste sich jede
+ * Breite und jedes Farbschema neu anmelden, und das kostet je 100 ms
+ * Passwortprüfung plus einen Seitenwechsel.
+ */
+async function anmeldezustand() {
+  const ctx = await browser.newContext({ viewport: { width: 1280, height: 900 } });
+  const page = await ctx.newPage();
+  await page.goto(BASIS + '/', { waitUntil: 'networkidle' });
+  await page.getByLabel('E-Mail').fill(EMAIL);
+  await page.getByLabel('Passwort').fill(PASSWORT);
+  await page.getByRole('button', { name: 'Anmelden' }).click();
+  await page.waitForTimeout(2000);
+  if (await page.getByLabel('Passwort').count()) {
+    console.error('Anmeldung fehlgeschlagen -- stimmen TD_EMAIL und TD_PASSWORT?');
+    await browser.close();
+    process.exit(2);
+  }
+  const zustand = await ctx.storageState();
+  await ctx.close();
+  return zustand;
+}
+
+const sitzung = await anmeldezustand();
 
 /** Hängt die Fehler-Aufzeichnung an eine Seite. */
 function beobachte(page, wo) {
@@ -90,7 +130,10 @@ for (const [modus, theme] of [
   ['dunkel', 'dark'],
 ]) {
   for (const [breiteName, w, h] of BREITEN) {
-    const ctx = await browser.newContext({ viewport: { width: w, height: h } });
+    const ctx = await browser.newContext({
+      viewport: { width: w, height: h },
+      storageState: sitzung,
+    });
     const page = await ctx.newPage();
 
     for (const [seiteName, pfad] of SEITEN) {
@@ -132,7 +175,10 @@ for (const [modus, theme] of [
 // Trade-Liste sichtbar. Beide wären doppelt, keine wäre die tote Zone.
 console.log('Trade-Liste, genau eine Darstellung je Breite:');
 for (const [name, w, h] of BREITEN) {
-  const ctx = await browser.newContext({ viewport: { width: w, height: h } });
+  const ctx = await browser.newContext({
+      viewport: { width: w, height: h },
+      storageState: sitzung,
+    });
   const page = await ctx.newPage();
   await page.goto(BASIS + '/trades', { waitUntil: 'networkidle' });
   await page.waitForTimeout(800);
@@ -165,7 +211,10 @@ for (const [name, w, h] of BREITEN) {
 
 // Zusicherung 4: Die Schrift kommt aus dem eigenen Verzeichnis und ist da.
 {
-  const ctx = await browser.newContext({ viewport: { width: 1280, height: 900 } });
+  const ctx = await browser.newContext({
+    viewport: { width: 1280, height: 900 },
+    storageState: sitzung,
+  });
   const page = await ctx.newPage();
   await page.goto(BASIS + '/', { waitUntil: 'networkidle' });
   await page.waitForTimeout(600);
