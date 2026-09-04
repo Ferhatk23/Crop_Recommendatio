@@ -41,22 +41,62 @@ export interface SyncState {
   deals_imported?: number;
 }
 
+export type KontoPhase = 'challenge' | 'verifikation' | 'funded' | 'live';
+export type KontoStatus = 'aktiv' | 'bestanden' | 'verloren' | 'archiviert';
+
+export const PHASEN: { id: KontoPhase; label: string }[] = [
+  { id: 'challenge', label: 'Challenge' },
+  { id: 'verifikation', label: 'Verifikation' },
+  { id: 'funded', label: 'Funded' },
+  { id: 'live', label: 'Eigenes Konto' },
+];
+
+export const STATUS: { id: KontoStatus; label: string }[] = [
+  { id: 'aktiv', label: 'aktiv' },
+  { id: 'bestanden', label: 'bestanden' },
+  { id: 'verloren', label: 'verloren' },
+  { id: 'archiviert', label: 'archiviert' },
+];
+
+export interface Limits {
+  daily_loss: number | null;
+  max_loss: number | null;
+  consistency: number | null;
+  warn_threshold: number | null;
+  profit_target: number | null;
+}
+
 export interface Account {
   id: number;
   label: string;
+  login: string | null;
   broker: string | null;
+  server: string | null;
   currency: string;
   phase: string;
   status: string;
   starting_balance: number | null;
-  limits: {
-    daily_loss: number | null;
-    max_loss: number | null;
-    consistency: number | null;
-    warn_threshold: number | null;
-    profit_target: number | null;
-  };
+  limits: Limits;
+  /** Zahl der Ausfuehrungen - ab eins ist das Konto nicht mehr loeschbar. */
+  deal_count: number;
   sync: SyncState;
+}
+
+/** Was sich an einem Konto eintragen laesst. */
+export interface KontoFelder {
+  label: string;
+  login?: string | null;
+  broker?: string | null;
+  server?: string | null;
+  currency?: string;
+  phase?: string;
+  status?: string;
+  starting_balance?: number;
+  daily_loss_limit?: number | null;
+  max_loss_limit?: number | null;
+  consistency_limit?: number | null;
+  warn_threshold?: number | null;
+  profit_target?: number | null;
 }
 
 export interface Metrics {
@@ -344,6 +384,24 @@ export const api = {
   /* --- Daten ---------------------------------------------------------- */
 
   accounts: () => hole<Account[]>('/api/accounts'),
+
+  konto_anlegen: (felder: KontoFelder) =>
+    hole<Account>('/api/accounts', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(felder),
+    }),
+
+  /** Aendert nur die mitgegebenen Felder - wie bei den Trades. */
+  konto_aendern: (id: number, felder: Partial<KontoFelder>) =>
+    hole<Account>(`/api/accounts/${id}`, {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(felder),
+    }),
+
+  konto_loeschen: (id: number) =>
+    hole<{ status: string }>(`/api/accounts/${id}`, { method: 'DELETE' }),
 
   overview: (f: Filters) => hole<Overview>(`/api/overview${query({ ...f })}`),
 

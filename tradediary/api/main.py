@@ -488,29 +488,274 @@ def accounts(
         .where(db.Account.user_id == nutzer.id)
         .order_by(db.Account.id)
     ).all()
-    heraus = []
-    for a in zeilen:
-        zustand = session.get(db.SyncState, a.id)
-        heraus.append(
-            {
-                "id": a.id,
-                "label": a.label,
-                "broker": a.broker,
-                "currency": a.currency,
-                "phase": a.phase.value if hasattr(a.phase, "value") else a.phase,
-                "status": a.status.value if hasattr(a.status, "value") else a.status,
-                "starting_balance": z(a.starting_balance),
-                "limits": {
-                    "daily_loss": z(a.daily_loss_limit),
-                    "max_loss": z(a.max_loss_limit),
-                    "consistency": z(a.consistency_limit),
-                    "warn_threshold": z(a.warn_threshold),
-                    "profit_target": z(a.profit_target),
-                },
-                "sync": sync_block(zustand),
-            }
+    return [konto_block(session, a) for a in zeilen]
+
+
+def konto_block(session: Session, a: db.Account) -> dict:
+    zustand = session.get(db.SyncState, a.id)
+    return {
+        "id": a.id,
+        "label": a.label,
+        "login": a.login,
+        "broker": a.broker,
+        "server": a.server,
+        "currency": a.currency,
+        "phase": a.phase.value if hasattr(a.phase, "value") else a.phase,
+        "status": a.status.value if hasattr(a.status, "value") else a.status,
+        "starting_balance": z(a.starting_balance),
+        "limits": {
+            "daily_loss": z(a.daily_loss_limit),
+            "max_loss": z(a.max_loss_limit),
+            "consistency": z(a.consistency_limit),
+            "warn_threshold": z(a.warn_threshold),
+            "profit_target": z(a.profit_target),
+        },
+        # Wie viele Ausführungen daran hängen -- die Oberfläche braucht
+        # das, um zu entscheiden, ob ein Konto noch löschbar ist und ob
+        # eine Änderung am Startkapital die Equity-Kurve verschiebt.
+        "deal_count": session.scalar(
+            select(func.count()).select_from(db.Deal).where(db.Deal.account_id == a.id)
         )
-    return heraus
+        or 0,
+        "sync": sync_block(zustand),
+    }
+
+
+# ---------------------------------------------------------------------------
+# Konten anlegen und ändern
+# ---------------------------------------------------------------------------
+#
+# Ohne diese Endpunkte ist die App nach einer frischen Installation nicht
+# benutzbar: `einrichten.sh` legt ein leeres Schema an, `nutzer.py` einen
+# Nutzer -- und dann fehlte jeder Weg, das eigene Handelskonto einzutragen,
+# ausser von Hand per SQL.
+#
+# Die Grenzwerte sind dabei nicht Beiwerk, sondern der Grund, warum es die
+# Regel-Puffer gibt. Ein falsch eingetragenes Tagesverlust-Limit zeigt
+# einen Puffer, den es nicht gibt -- und das ist schlimmer als gar keiner,
+# weil man sich darauf verlässt.
+
+
+class KontoEingabe(BaseModel):
+    label: str
+    login: str | None = None
+    broker: str | None = None
+    server: str | None = None
+    currency: str = "EUR"
+    phase: str = "challenge"
+    status: str = "aktiv"
+    starting_balance: float = 0
+    daily_loss_limit: float | None = None
+    max_loss_limit: float | None = None
+    consistency_limit: float | None = None
+    warn_threshold: float = 0.8
+    profit_target: float | None = None
+
+
+class KontoAenderung(BaseModel):
+    """Wie bei den Trades: Nur was dasteht, wird geändert."""
+
+    label: str | None = None
+    login: str | None = None
+    broker: str | None = None
+    server: str | None = None
+    currency: str | None = None
+    phase: str | None = None
+    status: str | None = None
+    starting_balance: float | None = None
+    daily_loss_limit: float | None = None
+    max_loss_limit: float | None = None
+    consistency_limit: float | None = None
+    warn_threshold: float | None = None
+    profit_target: float | None = None
+
+
+#: Feldname -> wie das Feld in der Oberfläche heisst.
+#:
+#: Eine Fehlermeldung, die "consistency_limit" sagt, hilft niemandem, der
+#: gerade in ein Feld namens "Konsistenzregel" getippt hat. Der Nutzer
+#: soll die Stelle wiederfinden, nicht den Quelltext lesen müssen.
+FELDNAMEN = {
+    "label": "Bezeichnung",
+    "daily_loss_limit": "Tagesverlust",
+    "max_loss_limit": "Gesamtverlust",
+    "consistency_limit": "Konsistenzregel",
+    "warn_threshold": "Warnschwelle",
+    "profit_target": "Gewinnziel",
+    "starting_balance": "Startkapital",
+    "phase": "Phase",
+    "status": "Status",
+}
+
+
+def _pruefe_kontowerte(werte: dict) -> None:
+    """Die Grenzwerte auf Plausibilität prüfen.
+
+    Jede Prüfung hier steht für eine Zahl, die in der Oberfläche als
+    Sicherheit erscheinen würde, ohne eine zu sein.
+    """
+    name = lambda feld: FELDNAMEN.get(feld, feld)
+    if "label" in werte and not (werte["label"] or "").strip():
+        raise HTTPException(400, "Das Konto braucht eine Bezeichnung")
+
+    for feld in ("phase", "status"):
+        wert = werte.get(feld)
+        if wert is None:
+            continue
+        typ = db.KontoPhase if feld == "phase" else db.KontoStatus
+        try:
+            typ(wert)
+        except ValueError:
+            erlaubt = ", ".join(x.value for x in typ)
+            raise HTTPException(
+                400, f"Unbekannte {name(feld)}: {wert} (möglich: {erlaubt})"
+            )
+
+    # Ein Limit von 0 wäre kein Limit, sondern ein sofort gerissenes:
+    # Der Puffer stünde von der ersten Sekunde an auf null.
+    for feld in ("daily_loss_limit", "max_loss_limit", "profit_target"):
+        wert = werte.get(feld)
+        if wert is not None and wert <= 0:
+            raise HTTPException(
+                400,
+                f"{name(feld)} muss grösser als null sein — ein Limit von 0 "
+                "wäre vom ersten Augenblick an gerissen. Leer lassen, wenn "
+                "es diese Grenze bei deinem Konto nicht gibt.",
+            )
+
+    # Anteile, keine Prozentzahlen. Wer 40 statt 0.4 einträgt, bekäme eine
+    # Konsistenzregel, die nie greift.
+    for feld in ("consistency_limit", "warn_threshold"):
+        wert = werte.get(feld)
+        if wert is not None and not 0 < wert <= 1:
+            raise HTTPException(
+                400,
+                f"{name(feld)} ist ein Anteil zwischen 0 und 1 — "
+                "40 % werden als 0,4 eingetragen, nicht als 40.",
+            )
+
+    if werte.get("starting_balance") is not None and werte["starting_balance"] < 0:
+        raise HTTPException(400, "Das Startkapital kann nicht negativ sein")
+
+    if "label" in werte and len((werte["label"] or "").strip()) > 120:
+        raise HTTPException(400, "Die Bezeichnung ist zu lang (höchstens 120 Zeichen)")
+
+    tag = werte.get("daily_loss_limit")
+    gesamt = werte.get("max_loss_limit")
+    if tag is not None and gesamt is not None and tag > gesamt:
+        raise HTTPException(
+            400,
+            "Der Tagesverlust darf nicht über dem Gesamtverlust liegen — "
+            "sonst wäre das Konto verloren, bevor das Tageslimit greift.",
+        )
+
+
+@app.post("/api/accounts", status_code=201)
+def konto_anlegen(
+    eingabe: KontoEingabe,
+    nutzer: db.User = Depends(aktueller_nutzer),
+    session: Session = Depends(hole_session),
+):
+    werte = eingabe.model_dump()
+    _pruefe_kontowerte(werte)
+
+    konto = db.Account(
+        user_id=nutzer.id,
+        label=werte["label"].strip(),
+        login=(werte["login"] or "").strip() or None,
+        broker=(werte["broker"] or "").strip() or None,
+        server=(werte["server"] or "").strip() or None,
+        currency=werte["currency"].strip().upper() or "EUR",
+        phase=db.KontoPhase(werte["phase"]),
+        status=db.KontoStatus(werte["status"]),
+        starting_balance=werte["starting_balance"],
+        daily_loss_limit=werte["daily_loss_limit"],
+        max_loss_limit=werte["max_loss_limit"],
+        consistency_limit=werte["consistency_limit"],
+        warn_threshold=werte["warn_threshold"],
+        profit_target=werte["profit_target"],
+    )
+    session.add(konto)
+    session.commit()
+    session.refresh(konto)
+    return konto_block(session, konto)
+
+
+@app.patch("/api/accounts/{account_id}")
+def konto_aendern(
+    account_id: int,
+    aenderung: KontoAenderung,
+    nutzer: db.User = Depends(aktueller_nutzer),
+    session: Session = Depends(hole_session),
+):
+    konto = pruefe_konto(session, nutzer, account_id)
+    gesetzt = aenderung.model_fields_set
+    werte = {k: v for k, v in aenderung.model_dump().items() if k in gesetzt}
+
+    # Beim Prüfen die *neuen* Werte gegen die vorhandenen halten: Wer nur
+    # das Tageslimit ändert, muss trotzdem gegen den gespeicherten
+    # Gesamtverlust geprüft werden.
+    vollstaendig = {
+        "daily_loss_limit": konto.daily_loss_limit,
+        "max_loss_limit": konto.max_loss_limit,
+        **werte,
+    }
+    _pruefe_kontowerte(vollstaendig)
+
+    for feld, wert in werte.items():
+        if feld == "phase":
+            konto.phase = db.KontoPhase(wert)
+        elif feld == "status":
+            konto.status = db.KontoStatus(wert)
+        elif feld in ("label", "currency"):
+            konto.__setattr__(feld, (wert or "").strip() or konto.__getattribute__(feld))
+        elif feld in ("login", "broker", "server"):
+            konto.__setattr__(feld, (wert or "").strip() or None)
+        else:
+            konto.__setattr__(feld, wert)
+
+    session.commit()
+    session.refresh(konto)
+    return konto_block(session, konto)
+
+
+@app.delete("/api/accounts/{account_id}")
+def konto_loeschen(
+    account_id: int,
+    nutzer: db.User = Depends(aktueller_nutzer),
+    session: Session = Depends(hole_session),
+):
+    """Löscht ein Konto -- aber nur ein leeres.
+
+    Ein Konto mit Ausführungen zu löschen hiesse, Handelshistorie
+    wegzuwerfen, die nirgends sonst steht. Ein verlorenes Challenge-Konto
+    gehört auf `status: verloren`, nicht in den Papierkorb: Seine Trades
+    sind die Lehre, für die man bezahlt hat.
+    """
+    konto = pruefe_konto(session, nutzer, account_id)
+
+    anzahl = session.scalar(
+        select(func.count()).select_from(db.Deal).where(db.Deal.account_id == konto.id)
+    ) or 0
+    if anzahl:
+        raise HTTPException(
+            409,
+            f"Das Konto hat {anzahl} Ausführungen und wird nicht gelöscht. "
+            "Ein abgeschlossenes Konto gehört auf 'archiviert' oder "
+            "'verloren' -- seine Trades sind die Lehre, für die du bezahlt hast.",
+        )
+
+    # Was noch daran hängt, geht mit: Marken und Sync-Zustand haben ohne
+    # das Konto keine Bedeutung.
+    session.execute(
+        delete(db.Zugangsmarke).where(db.Zugangsmarke.account_id == konto.id)
+    )
+    zustand = session.get(db.SyncState, konto.id)
+    if zustand is not None:
+        session.delete(zustand)
+    session.delete(konto)
+    session.commit()
+    return {"status": "geloescht", "id": account_id}
 
 
 def sync_block(zustand: db.SyncState | None) -> dict:

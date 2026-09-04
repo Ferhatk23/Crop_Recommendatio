@@ -293,6 +293,27 @@ export function Shell({ children }: { children: React.ReactNode }) {
           >
             {theme === 'dark' ? '☀ Hell' : '☾ Dunkel'}
           </button>
+          {/* Einstellungen gehören nicht in die Hauptnavigation: Man geht
+              einmal hin, trägt sein Konto ein, und kommt danach selten
+              wieder. In der Tab-Leiste unten nähme das den Platz eines
+              Bildschirms weg, den man täglich braucht. */}
+          <Link
+            href="/einstellungen"
+            aria-current={pfad === '/einstellungen' ? 'page' : undefined}
+            className="td-tap"
+            style={{
+              display: 'block',
+              fontSize: 11,
+              color:
+                pfad === '/einstellungen'
+                  ? 'var(--td-text)'
+                  : 'var(--td-neutral)',
+              fontWeight: pfad === '/einstellungen' ? 600 : 400,
+              borderTop: '1px solid var(--td-line)',
+            }}
+          >
+            ⚙ Einstellungen
+          </Link>
           <button
             onClick={() => void abmelden()}
             className="td-tap nur-breit"

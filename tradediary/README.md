@@ -58,7 +58,8 @@ deploy/                # Inbetriebnahme
 web/                   # Next.js 15, React 19, TypeScript
 ├── lib/               # outcome(), Formatierung, API-Client
 ├── components/        # Kacheln, Diagramme, Listen, Gerüst
-└── app/               # Dashboard, Kalender, Trades, Reports, Journal
+└── app/               # Dashboard, Kalender, Trades, Reports, Journal,
+                       # Einstellungen
 ```
 
 ## Die zwei Wege von Deals zu Trades
@@ -261,6 +262,35 @@ Orders nachtragen, Lieferung, Wiederholbarkeit. Was es nicht prüfen kann,
 ist, ob das echte Terminal dieselben Felder liefert — der erste Lauf gehört
 gegen ein Demo-Konto.
 
+## Konten und Grenzwerte
+
+Unter `/einstellungen`. Das ist der Bildschirm, ohne den die App nach einer
+frischen Installation nicht benutzbar wäre: `einrichten.sh` legt ein leeres
+Schema an, `nutzer.py` einen Nutzer — und danach führte kein Weg mehr zum
+eigenen Handelskonto ausser von Hand per SQL.
+
+Der eigentliche Inhalt sind die **Grenzwerte**. Sie sind nicht Beiwerk,
+sondern der Grund, warum es die Regel-Puffer auf dem Dashboard gibt. Ein
+falsch eingetragenes Limit zeigt einen Puffer, den es nicht gibt — und das
+ist schlimmer als gar keiner, weil man sich darauf verlässt. Deshalb wird
+jeder Wert geprüft, und jede Prüfung steht für eine Zahl, die sonst als
+Sicherheit erschiene:
+
+| Eingabe | Antwort |
+|---|---|
+| Limit `0` | abgelehnt — wäre vom ersten Augenblick an gerissen |
+| Konsistenz `40` statt `0,4` | abgelehnt, mit dem Hinweis, wie es richtig geht |
+| Tagesverlust über Gesamtverlust | abgelehnt — das Konto wäre verloren, bevor das Tageslimit greift |
+| Limit leer | erlaubt — ein Privatkonto hat diese Grenzen nicht, und dann zeigt die App keinen Puffer statt eines erfundenen |
+
+Die Fehlermeldungen nennen das Feld so, wie es auf dem Bildschirm heisst
+(„Konsistenzregel", nicht `consistency_limit`). Klingt nebensächlich; wer
+gerade in ein Feld getippt hat, findet die Stelle sonst nicht wieder.
+
+**Gelöscht wird nur ein leeres Konto.** Ein verlorenes Challenge-Konto
+gehört auf `status: verloren`, nicht in den Papierkorb — seine Trades sind
+die Lehre, für die man bezahlt hat.
+
 ## Anmeldung
 
 Serverseitige Sitzungen in einem HttpOnly-Cookie. Vier Entscheidungen, die
@@ -404,6 +434,7 @@ export TD_EMAIL=… TD_PASSWORT=…        # aus der Ausgabe von seed_db.py
 node tools/pruefe-anmeldung.mjs        # Anmeldung, Cookie, Abmelden
 node tools/pruefe-oberflaeche.mjs      # Darstellung auf drei Breiten
 node tools/pruefe-schreiben.mjs        # Speichern und Wiederfinden
+node tools/pruefe-konten.mjs           # Konto anlegen, Grenzwerte, Löschen
 node tools/pruefe-oberflaeche.mjs --bilder   # zusätzlich Screenshots
 ```
 
@@ -454,8 +485,10 @@ Damit der Stand nicht besser klingt, als er ist:
 - **Playbook-Seiten.** Playbooks lassen sich einem Trade zuordnen und über
   `/api/playbooks` lesen, aber nicht in der Oberfläche anlegen oder
   bearbeiten — und die Regel-Häkchen je Trade werden noch nicht gespeichert.
-- **Einstellungen und Einrichtung.** Konten, Limits und Spaltenzuordnung für
-  den CSV-Import stehen nur in der Datenbank, nicht in der Oberfläche.
+- **Spaltenzuordnung für den CSV-Import** lässt sich nur über die API
+  mitgeben, nicht in der Oberfläche einstellen. Die Erkennung trifft die
+  gängigen Broker-Exporte von selbst; bei einem exotischen Format braucht es
+  einen API-Aufruf von Hand.
 - **Der erste Lauf von `einrichten.sh` auf dem Zielrechner.** Der Aufbau ist
   gegen echtes Caddy durchgemessen und alle systemd-Units validieren, aber
   `useradd`, Systempfade und das Zusammenspiel unter laufendem systemd liessen
@@ -467,5 +500,7 @@ Damit der Stand nicht besser klingt, als er ist:
 
 1. **Auf dem Ubuntu-Rechner einrichten** und den Sammler an ein Demo-Konto
    hängen. Die beiden verbliebenen ungeprüften Punkte, beide nur dort prüfbar.
-2. **Playbook-Seiten** samt Regel-Häkchen je Trade.
+2. **Playbook-Seiten** samt Regel-Häkchen je Trade — die letzte grössere
+   Lücke: Playbooks lassen sich zuordnen, aber nicht in der Oberfläche
+   anlegen, und die Häkchen je Trade werden noch nicht gespeichert.
 3. **Schema-Wanderungen**, sobald sich das Datenmodell im Betrieb ändert.
