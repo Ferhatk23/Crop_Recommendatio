@@ -315,6 +315,16 @@ node tools/pruefe-schreiben.mjs        # Speichern und Wiederfinden
 node tools/pruefe-oberflaeche.mjs --bilder   # zusätzlich Screenshots
 ```
 
+Rückgabewert 0 wenn alles stimmt, 1 bei Befunden, 2 wenn die Anmeldung
+scheitert — nachgemessen, nicht angenommen.
+
+Ein Hinweis zum Nebeneinander: `npm run build` schreibt nach `.next-build`,
+`npm run dev` nach `.next`. Ohne die Trennung überschreibt ein Bau das
+Verzeichnis, aus dem der laufende Dev-Server gerade liest; der antwortet
+dann auf jeder Seite mit 500. Das sieht aus wie ein Fehler in der App und
+kostet eine halbe Stunde Suche an der falschen Stelle — hier zweimal
+passiert, bevor `distDir` in `next.config.mjs` stand.
+
 Braucht Playwright (`npm install --no-save playwright`) und eine laufende
 Oberfläche. Bewusst keine Abhängigkeit in `package.json`: Das Skript ist
 Werkzeug, keine Voraussetzung zum Bauen.

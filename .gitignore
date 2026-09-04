@@ -22,6 +22,15 @@ venv/
 # Web
 node_modules/
 .next/
+.next-build/
+
+# Von Next.js erzeugt und nicht stabil: Der Verweis darin zeigt auf das
+# Ausgabeverzeichnis des zuletzt gelaufenen Befehls -- nach `npm run dev`
+# auf .next, nach `npm run build` auf .next-build. Eingecheckt stuende
+# die Datei nach jedem Befehl als geaendert im Arbeitsverzeichnis.
+# Nachgemessen: `tsc --noEmit` laeuft auch ohne sie sauber durch, und
+# beide Befehle legen sie ohnehin neu an.
+next-env.d.ts
 out/
 *.tsbuildinfo
 .DS_Store
