@@ -1,0 +1,19 @@
+[Unit]
+Description=TradeDiary sichern
+Documentation=https://github.com/Ferhatk23/Crop_Recommendatio
+
+[Service]
+Type=oneshot
+User=tradediary
+Group=tradediary
+WorkingDirectory=/opt/tradediary
+EnvironmentFile=/etc/tradediary/api.env
+
+ExecStart=/opt/tradediary/.venv/bin/python deploy/sicherung.py \
+    --ziel /var/backups/tradediary --behalten 30
+
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/var/lib/tradediary /var/backups/tradediary

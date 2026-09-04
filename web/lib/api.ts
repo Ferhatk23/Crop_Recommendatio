@@ -6,6 +6,29 @@
  * eine 0 umgedeutet.
  */
 
+/**
+ * Wohin die Anfragen gehen.
+ *
+ * Im Betrieb steht hier eine **leere Zeichenkette**, und das ist der
+ * ganze Trick: Dann sind die Pfade relativ (`/api/trades`), und der
+ * Reverse Proxy reicht sie an die API weiter. Oberfläche und API liegen
+ * damit auf demselben Ursprung -- und drei Fehlerquellen fallen auf
+ * einmal weg:
+ *
+ * * **Kein CORS.** Keine Freigabeliste, die man beim Umzug auf eine neue
+ *   Domain nachziehen muss und deren Vergessen sich als "Failed to
+ *   fetch" zeigt.
+ * * **Kein Cookie-Ärger.** Das Sitzungs-Cookie ist same-site, also
+ *   unabhängig davon, wie streng der Browser mit fremden Ursprüngen
+ *   umgeht.
+ * * **Kein zweiter Port nach draußen.** Nur der Proxy hört auf 443; API
+ *   und Oberfläche bleiben auf 127.0.0.1.
+ *
+ * `??` und nicht `||`: Eine leere Zeichenkette ist ein *gültiger* Wert
+ * und darf nicht auf den Entwicklungs-Standard zurückfallen. Mit `||`
+ * würde der Betrieb still auf `127.0.0.1:8000` zeigen -- und das wäre
+ * aus dem Browser des iPhones der Rechner des Nutzers selbst.
+ */
 export const API_BASE =
   process.env.NEXT_PUBLIC_API_BASE ?? 'http://127.0.0.1:8000';
 

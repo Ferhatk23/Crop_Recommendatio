@@ -1,0 +1,55 @@
+[Unit]
+Description=TradeDiary Oberfläche
+Documentation=https://github.com/Ferhatk23/Crop_Recommendatio
+After=network-online.target tradediary-api.service
+Wants=network-online.target
+
+[Service]
+Type=exec
+User=tradediary
+Group=tradediary
+WorkingDirectory=/opt/tradediary/web
+
+Environment=NODE_ENV=production
+# Der gebaute Stand liegt in .next-build, nicht in .next -- damit ein Bau
+# nie das Verzeichnis überschreibt, aus dem ein laufender Dev-Server liest.
+Environment=TD_DIST_DIR=.next-build
+# Nur Loopback. Nach draussen hört ausschliesslich der Proxy.
+Environment=HOSTNAME=127.0.0.1
+Environment=PORT=3000
+
+# Der Pfad wird beim Einrichten eingesetzt: Unter Ubuntu mit
+# `apt install nodejs` ist es /usr/bin/node, mit nvm oder einem Tarball
+# liegt node ganz woanders. Ein fest verdrahteter Pfad bricht dann mit
+# "203/EXEC" -- eine Meldung, aus der man den Grund nicht abliest.
+ExecStart=__NODE__ node_modules/.bin/next start
+
+Restart=always
+RestartSec=5
+
+# --- Absicherung -----------------------------------------------------------
+#
+# Die Oberfläche liefert nur vorgebaute Seiten aus. Sie braucht nirgends
+# Schreibrechte -- ProtectSystem=strict ohne ein einziges ReadWritePaths.
+
+NoNewPrivileges=true
+PrivateTmp=true
+PrivateDevices=true
+ProtectSystem=strict
+ProtectHome=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+ProtectClock=true
+ProtectHostname=true
+RestrictNamespaces=true
+RestrictRealtime=true
+RestrictSUIDSGID=true
+LockPersonality=true
+SystemCallArchitectures=native
+SystemCallFilter=@system-service
+SystemCallErrorNumber=EPERM
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+
+[Install]
+WantedBy=multi-user.target

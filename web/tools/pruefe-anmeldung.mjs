@@ -15,6 +15,14 @@ import process from 'node:process';
 
 const BASIS = process.env.TD_WEB_URL ?? 'http://127.0.0.1:3000';
 const CHROME = process.env.TD_CHROME ?? null;
+
+/**
+ * Zertifikatsfehler übergehen -- nur zum Prüfen gegen einen Proxy mit
+ * selbstsigniertem Zertifikat (`tls internal` bei Caddy). Im Betrieb
+ * bleibt das aus: Ein Prüfskript, das TLS-Fehler grundsätzlich
+ * verschluckt, würde ein abgelaufenes Zertifikat nicht mehr melden.
+ */
+const TLS_EGAL = process.env.TD_TLS_EGAL === '1';
 const EMAIL = process.env.TD_EMAIL;
 const PASSWORT = process.env.TD_PASSWORT;
 
@@ -40,7 +48,8 @@ const pruefe = (bedingung, text) => {
 };
 
 const browser = await chromium.launch(CHROME ? { executablePath: CHROME } : {});
-const ctx = await browser.newContext({ viewport: { width: 1280, height: 900 } });
+const ctx = await browser.newContext({
+      ignoreHTTPSErrors: TLS_EGAL, viewport: { width: 1280, height: 900 } });
 const page = await ctx.newPage();
 page.on('pageerror', (e) => fehler.push(`Ausnahme: ${e.message}`));
 

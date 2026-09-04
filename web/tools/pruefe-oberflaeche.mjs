@@ -36,6 +36,14 @@ const BILDER_ZIEL = process.env.TD_SHOTS ?? '/tmp/td-shots';
 /** Pfad zum vorinstallierten Chromium, falls Playwright seinen nicht findet. */
 const CHROME = process.env.TD_CHROME ?? null;
 
+/**
+ * Zertifikatsfehler übergehen -- nur zum Prüfen gegen einen Proxy mit
+ * selbstsigniertem Zertifikat (`tls internal` bei Caddy). Im Betrieb
+ * bleibt das aus: Ein Prüfskript, das TLS-Fehler grundsätzlich
+ * verschluckt, würde ein abgelaufenes Zertifikat nicht mehr melden.
+ */
+const TLS_EGAL = process.env.TD_TLS_EGAL === '1';
+
 const SEITEN = [
   ['Dashboard', '/'],
   ['Kalender', '/kalender'],
@@ -85,7 +93,8 @@ const browser = await chromium.launch(
  * Passwortprüfung plus einen Seitenwechsel.
  */
 async function anmeldezustand() {
-  const ctx = await browser.newContext({ viewport: { width: 1280, height: 900 } });
+  const ctx = await browser.newContext({
+      ignoreHTTPSErrors: TLS_EGAL, viewport: { width: 1280, height: 900 } });
   const page = await ctx.newPage();
   await page.goto(BASIS + '/', { waitUntil: 'networkidle' });
   await page.getByLabel('E-Mail').fill(EMAIL);
@@ -131,6 +140,7 @@ for (const [modus, theme] of [
 ]) {
   for (const [breiteName, w, h] of BREITEN) {
     const ctx = await browser.newContext({
+      ignoreHTTPSErrors: TLS_EGAL,
       viewport: { width: w, height: h },
       storageState: sitzung,
     });
@@ -176,6 +186,7 @@ for (const [modus, theme] of [
 console.log('Trade-Liste, genau eine Darstellung je Breite:');
 for (const [name, w, h] of BREITEN) {
   const ctx = await browser.newContext({
+      ignoreHTTPSErrors: TLS_EGAL,
       viewport: { width: w, height: h },
       storageState: sitzung,
     });
@@ -212,6 +223,7 @@ for (const [name, w, h] of BREITEN) {
 // Zusicherung 4: Die Schrift kommt aus dem eigenen Verzeichnis und ist da.
 {
   const ctx = await browser.newContext({
+      ignoreHTTPSErrors: TLS_EGAL,
     viewport: { width: 1280, height: 900 },
     storageState: sitzung,
   });

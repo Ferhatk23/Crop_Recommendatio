@@ -1,0 +1,65 @@
+[Unit]
+Description=TradeDiary API
+Documentation=https://github.com/Ferhatk23/Crop_Recommendatio
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=exec
+User=tradediary
+Group=tradediary
+WorkingDirectory=/opt/tradediary
+
+# Zugangsdaten stehen in einer Datei mit 0600, nicht hier. Eine
+# Unit-Datei ist für jeden lesbar, der auf dem Rechner ein Terminal hat --
+# `systemctl cat` zeigt sie ohne Sonderrechte an.
+EnvironmentFile=/etc/tradediary/api.env
+
+# Nur auf die Loopback-Adresse. Nach draussen hört ausschliesslich der
+# Reverse Proxy; die API selbst ist von aussen nicht erreichbar, auch
+# nicht versehentlich über eine offene Firewall.
+#
+# --proxy-headers, damit die API weiss, dass die Anfrage draussen über
+# HTTPS kam. Ohne das hielte sie jede Anfrage für unverschlüsselt.
+# --forwarded-allow-ips begrenzt das auf den Proxy: Sonst könnte jeder,
+# der die API direkt erreicht, sich per Kopfzeile als HTTPS ausgeben.
+ExecStart=/opt/tradediary/.venv/bin/uvicorn tradediary.api.main:app \
+    --host 127.0.0.1 --port 8000 \
+    --proxy-headers --forwarded-allow-ips=127.0.0.1
+
+Restart=always
+RestartSec=5
+
+# --- Absicherung -----------------------------------------------------------
+#
+# Ein Journal mit Kontodaten. Der Dienst braucht: sein eigenes
+# Verzeichnis, die Datenbank, sonst nichts.
+
+NoNewPrivileges=true
+PrivateTmp=true
+PrivateDevices=true
+ProtectSystem=strict
+ProtectHome=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+ProtectClock=true
+ProtectHostname=true
+RestrictNamespaces=true
+RestrictRealtime=true
+RestrictSUIDSGID=true
+LockPersonality=true
+MemoryDenyWriteExecute=true
+SystemCallArchitectures=native
+SystemCallFilter=@system-service
+SystemCallErrorNumber=EPERM
+
+# Nur zwei Adressfamilien: Netzwerk zum Lauschen, Unix für nichts
+# Besonderes. Kein AF_PACKET, kein Rohzugriff.
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+
+# Das Einzige, was beschrieben werden darf.
+ReadWritePaths=/var/lib/tradediary
+
+[Install]
+WantedBy=multi-user.target

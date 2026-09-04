@@ -49,6 +49,12 @@ tradediary/
 collector/             # der Sammler, laeuft unter Wine
 └── sammler.py         # verbinden, Historie lesen, JSON schicken -- mehr nicht
 
+deploy/                # Inbetriebnahme
+├── einrichten.sh      # ein Lauf, wiederholbar
+├── Caddyfile          # TLS und ein Ursprung fuer alles
+├── sicherung.py       # taeglich, mit Nachpruefung
+└── *.service/.timer   # systemd
+
 web/                   # Next.js 15, React 19, TypeScript
 ├── lib/               # outcome(), Formatierung, API-Client
 ├── components/        # Kacheln, Diagramme, Listen, Gerüst
@@ -334,19 +340,37 @@ Dann `http://192.168.1.42:3000` vom Mac und vom iPad. **Nur im eigenen WLAN** �
 keine Portfreigabe im Router, solange kein TLS davor steht: Ohne HTTPS gehen
 Passwort und Sitzungs-Cookie im Klartext über die Leitung.
 
-### Ins Internet
+### In Betrieb nehmen
 
-Nicht direkt, sondern hinter einen Reverse Proxy mit TLS (Caddy nimmt einem
-das Zertifikat ab). Dann gehört gesetzt:
+Vollständig in [`deploy/README.md`](../deploy/README.md), in einem Zug:
 
 ```bash
-export TRADEDIARY_COOKIE_SECURE=true      # Cookie nur noch über HTTPS
-export TRADEDIARY_CORS="https://journal.example.com"
+sudo apt install python3-venv nodejs npm rsync curl caddy
+sudo ./deploy/einrichten.sh
 ```
 
-`TRADEDIARY_COOKIE_SECURE` steht standardmäßig auf `false`, weil das Cookie
-sonst im Heimnetz über `http://` nie gesetzt würde — und die Anmeldung
-fehlschlüge, ohne dass irgendwo etwas rot wird.
+Das legt einen Systemnutzer an, baut Python-Umgebung und Oberfläche, richtet
+systemd-Dienste und die tägliche Sicherung ein. Wiederholbar: Ein zweiter
+Lauf aktualisiert, ohne Datenbank oder Zugangsdaten anzufassen.
+
+**Ein Ursprung für alles.** Caddy liegt davor und verteilt: `/api/*` an die
+API, alles andere an die Oberfläche. API und Oberfläche hören nur auf
+`127.0.0.1`. Damit gibt es kein CORS, das Cookie ist same-site, und nach
+außen ist nur ein Port offen. Möglich macht das eine leere
+`NEXT_PUBLIC_API_BASE` beim Bauen — dann stehen relative Pfade im Bundle.
+
+`TRADEDIARY_COOKIE_SECURE` steht in der Entwicklung auf `false`, weil das
+Cookie sonst über `http://` nie gesetzt würde und die Anmeldung fehlschlüge,
+ohne dass irgendwo etwas rot wird. Hinter TLS gehört es auf `true`; das
+Einrichtungsskript schreibt es so in `/etc/tradediary/api.env`.
+
+### Sicherung
+
+Täglich um vier, 30 Tage lang, mit Nachprüfung der Kopie. Eine Sicherung,
+die nie geöffnet wurde, ist keine Sicherung, sondern eine Hoffnung — und
+eine gültige, *leere* Datenbank ist der gefährlichste Fall, weil sie jede
+Prüfung besteht und beim Zurückspielen alles durch nichts ersetzt. Beides
+fängt `deploy/sicherung.py` ab.
 
 | Umgebungsvariable | Standard | Wofür |
 |---|---|---|
@@ -432,15 +456,16 @@ Damit der Stand nicht besser klingt, als er ist:
   bearbeiten — und die Regel-Häkchen je Trade werden noch nicht gespeichert.
 - **Einstellungen und Einrichtung.** Konten, Limits und Spaltenzuordnung für
   den CSV-Import stehen nur in der Datenbank, nicht in der Oberfläche.
-- **Deployment.** Die Umgebungsvariablen sind da und dokumentiert, aber es
-  gibt keine Dienst-Datei, kein Container-Abbild und keine Proxy-Konfiguration
-  zum Übernehmen.
+- **Der erste Lauf von `einrichten.sh` auf dem Zielrechner.** Der Aufbau ist
+  gegen echtes Caddy durchgemessen und alle systemd-Units validieren, aber
+  `useradd`, Systempfade und das Zusammenspiel unter laufendem systemd liessen
+  sich hier nicht ausprobieren — in diesem Container ist systemd offline.
 - **Zwei-Faktor-Anmeldung.** Für ein Konto, das ins Internet zeigt, wäre sie
   angebracht; für den Betrieb im Heimnetz ist sie es nicht.
 
 ## Als Nächstes
 
-1. **Sammler an ein echtes Demo-Konto hängen** und die Uhrzeiten gegen das
-   Terminal prüfen. Das ist der einzige verbliebene ungeprüfte Punkt.
-2. **Deployment**: systemd-Dienste für API und Oberfläche, Caddy davor.
-3. **Playbook-Seiten** samt Regel-Häkchen je Trade.
+1. **Auf dem Ubuntu-Rechner einrichten** und den Sammler an ein Demo-Konto
+   hängen. Die beiden verbliebenen ungeprüften Punkte, beide nur dort prüfbar.
+2. **Playbook-Seiten** samt Regel-Häkchen je Trade.
+3. **Schema-Wanderungen**, sobald sich das Datenmodell im Betrieb ändert.
