@@ -118,6 +118,38 @@ class Sitzung(Base):
     user: Mapped["User"] = relationship()
 
 
+class Zugangsmarke(Base):
+    """Ein Zugang für Maschinen -- den Sammler unter Wine.
+
+    Getrennt von den Browser-Sitzungen, und das aus einem Grund: Diese
+    Marke steht dauerhaft in einer Konfigurationsdatei auf dem
+    Dauerrechner. Sie darf deshalb **nur einliefern**, nicht das Journal
+    lesen. Wer die Datei in die Hände bekommt, kann damit Deals schicken
+    (die man an den Tickets erkennt und wieder löschen kann), aber weder
+    Notizen lesen noch Kontostände sehen.
+
+    Sie an ein einzelnes Konto zu binden ist derselbe Gedanke eine Ebene
+    tiefer: Der Sammler für das Challenge-Konto hat im Funded-Konto
+    nichts verloren.
+    """
+
+    __tablename__ = "access_tokens"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    user_id: Mapped[int] = mapped_column(ForeignKey("users.id"), index=True)
+    #: Das Konto, für das diese Marke einliefern darf.
+    account_id: Mapped[int] = mapped_column(ForeignKey("accounts.id"), index=True)
+    #: SHA-256 der Marke -- wie bei den Sitzungen steht der Klartext nirgends.
+    token_hash: Mapped[str] = mapped_column(String(64), unique=True, index=True)
+    label: Mapped[str] = mapped_column(String(120), default="Sammler")
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=jetzt
+    )
+    last_used: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), default=None
+    )
+
+
 class Account(Base):
     """Ein Handelskonto. Ein Prop-Trader hat über die Zeit mehrere."""
 

@@ -10,6 +10,7 @@ venv/
 .env
 .env.*
 !.env.beispiel
+collector/.env
 
 # Der Datenbestand ist erzeugt, nicht gepflegt: `python scripts/seed_db.py`
 # baut ihn jederzeit neu. Eingecheckt würde er nur veralten -- und im

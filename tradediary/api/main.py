@@ -36,6 +36,7 @@ from ..db.repository import (
     kennzahlen,
     schema_anlegen,
     session_factory,
+    sync_vermerken,
     trade_zu_kern,
     trades_laden,
     zeilen_laden,
@@ -1421,6 +1422,127 @@ def playbooks(
         }
         for b in session.scalars(frage).all()
     ]
+
+
+# ---------------------------------------------------------------------------
+# Einlieferung durch den Sammler
+# ---------------------------------------------------------------------------
+#
+# Der Sammler läuft unter Wine auf dem Dauerrechner und schickt hierher,
+# was er in der MT5-Historie gefunden hat. Er rechnet nichts: Umwandlung,
+# Round-Trip-Bildung und Kennzahlen passieren alle hier. Was drüben nicht
+# steht, kann drüben nicht kaputtgehen.
+#
+# Der Zugang läuft über eine eigene Marke, nicht über eine Browser-Sitzung:
+# Sie steht dauerhaft in einer Datei auf dem Dauerrechner und darf deshalb
+# nur einliefern, nicht lesen.
+
+
+def sammler_marke(
+    request: Request, session: Session = Depends(hole_session)
+) -> db.Zugangsmarke:
+    """Prüft die Marke im `Authorization`-Kopf.
+
+    Bewusst nicht über das Sitzungs-Cookie: Der Sammler hat keinen
+    Browser, und ein Cookie mit 30 Tagen Laufzeit in einer
+    Konfigurationsdatei wäre ein Vollzugang zum Journal.
+    """
+    kopf = request.headers.get("authorization", "")
+    if not kopf.lower().startswith("bearer "):
+        raise HTTPException(401, "Zugangsmarke fehlt")
+
+    marke = session.scalars(
+        select(db.Zugangsmarke).where(
+            db.Zugangsmarke.token_hash == sicherheit.marken_hash(kopf[7:].strip())
+        )
+    ).first()
+    if marke is None:
+        raise HTTPException(401, "Zugangsmarke gilt nicht")
+
+    marke.last_used = datetime.now(timezone.utc)
+    session.commit()
+    return marke
+
+
+class Lieferung(BaseModel):
+    """Was der Sammler schickt."""
+
+    deals: list[dict] = []
+    #: Gemessener Versatz der Serverzeit gegenüber UTC, in Sekunden.
+    #: `None`, wenn bei geschlossenem Markt nicht gemessen werden konnte --
+    #: dann gilt der zuletzt bekannte Wert weiter.
+    server_utc_offset: int | None = None
+    fetched_at: str | None = None
+    #: Zeitraum, den der Sammler abgefragt hat -- nur fürs Protokoll.
+    window_from: str | None = None
+    window_to: str | None = None
+    collector: str | None = None
+
+
+@app.post("/api/ingest/deals")
+def einliefern(
+    lieferung: Lieferung,
+    marke: db.Zugangsmarke = Depends(sammler_marke),
+    session: Session = Depends(hole_session),
+):
+    """Nimmt eine Lieferung des Sammlers entgegen.
+
+    Wiederholbar: Dieselben Deals beliebig oft geschickt ergeben dieselbe
+    Datenlage. Das ist keine Bequemlichkeit, sondern die Grundlage des
+    Überlappungsfensters -- jeder Lauf greift drei Tage zurück, damit am
+    Rand nichts verlorengeht, und die Dubletten fallen hier still durch.
+    """
+    from ..db.repository import aufnehmen
+    from ..sync.mt5_source import ergebnis_aus_lieferung
+
+    konto = session.get(db.Account, marke.account_id)
+    if konto is None:
+        raise HTTPException(404, "Konto nicht gefunden")
+
+    try:
+        ergebnis, probleme = ergebnis_aus_lieferung(
+            lieferung.model_dump(), account_id=str(konto.id)
+        )
+    except Exception as fehler:  # noqa: BLE001 -- gehört in den Herzschlag
+        sync_vermerken(session, konto.id, "mt5", 0, str(fehler))
+        raise HTTPException(400, f"Lieferung nicht lesbar: {fehler}")
+
+    # Der Versatz wird nur überschrieben, wenn wirklich gemessen wurde.
+    # Bei geschlossenem Markt liefert der Sammler `None` -- und der
+    # zuletzt bekannte Wert ist dann besser als jede Neuberechnung.
+    if ergebnis.server_utc_offset is not None:
+        vorher = konto.server_utc_offset
+        konto.server_utc_offset = ergebnis.server_utc_offset
+        if vorher != ergebnis.server_utc_offset:
+            # Ein Wechsel bedeutet fast immer Sommerzeit beim Broker. Die
+            # schon gespeicherten Deals tragen den alten Versatz -- sie
+            # bleiben richtig, weil er beim Einliefern angewandt wurde.
+            session.commit()
+
+    try:
+        neu, anzahl = aufnehmen(session, konto.id, ergebnis.deals, source="mt5")
+    except Exception as fehler:  # noqa: BLE001
+        raise HTTPException(500, f"Speichern fehlgeschlagen: {fehler}")
+
+    return {
+        "ok": True,
+        "account_id": konto.id,
+        "deals_received": len(lieferung.deals),
+        "deals_new": neu,
+        "trades_total": anzahl,
+        "server_utc_offset": konto.server_utc_offset,
+        "offset_measured": ergebnis.server_utc_offset is not None,
+        "problems": probleme[:50],
+    }
+
+
+@app.get("/api/ingest/ping")
+def sammler_ping(marke: db.Zugangsmarke = Depends(sammler_marke)):
+    """Damit der Sammler seine Marke prüfen kann, bevor er loslegt.
+
+    Verrät nur, wofür die Marke gilt -- nicht, was in dem Konto steht.
+    """
+    return {"ok": True, "account_id": marke.account_id, "label": marke.label}
 
 
 def init_db() -> None:

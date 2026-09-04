@@ -3,8 +3,10 @@
 Ein Trading-Journal nach dem Vorbild von TradeZella: Trades laufen automatisch
 aus MT5 ein, die Auswertung liegt als Web-App auf Mac, iPad und iPhone.
 
-**Stand.** Kern, Datenbank, API, Anmeldung und Oberfläche stehen und laufen
-gegen einen Beispiel-Datenbestand. Was noch fehlt, steht unten unter
+**Stand.** Kern, Datenbank, API, Anmeldung, Oberfläche und der MT5-Sammler
+stehen. Alles bis auf den Sammler läuft hier gegen einen
+Beispiel-Datenbestand; der Sammler ist gegen ein nachgebautes MT5 geprüft
+und wartet auf den ersten Lauf an einem echten Terminal. Was noch fehlt, steht unten unter
 [Was noch nicht da ist](#was-noch-nicht-da-ist) — vollständig und ohne
 Beschönigung.
 
@@ -33,7 +35,8 @@ tradediary/
 ├── sources/
 │   └── csv_source.py  # Broker-CSV mit einstellbarer Spaltenzuordnung
 ├── sync/
-│   └── source.py      # die Schnittstelle, an der die Quelle austauschbar wird
+│   ├── source.py      # die Schnittstelle, an der die Quelle austauschbar wird
+│   └── mt5_source.py  # MT5-Deals -> Kern-Deals, samt Zeitzonen-Rechnung
 ├── db/
 │   ├── models.py      # SQLAlchemy-Schema
 │   └── repository.py  # Speichern, Neuberechnen, Lesen
@@ -42,6 +45,9 @@ tradediary/
 │   └── main.py        # FastAPI, Anmeldung, Zugriffsschutz
 └── demo/
     └── seed.py        # Beispieldaten, die sich wie echte benehmen
+
+collector/             # der Sammler, laeuft unter Wine
+└── sammler.py         # verbinden, Historie lesen, JSON schicken -- mehr nicht
 
 web/                   # Next.js 15, React 19, TypeScript
 ├── lib/               # outcome(), Formatierung, API-Client
@@ -186,6 +192,68 @@ Die API liefert **Rohwerte, keine fertigen Zeichenketten.** Nur so kann der
 Einheiten-Umschalter (€ / R / % / Pips) jede Zahl auf dem Bildschirm aus
 derselben Quelle umrechnen. Fehlt die Bezugsgröße — kein Risiko, also kein R —
 steht ein Strich, keine geschätzte Zahl.
+
+## Der MT5-Sammler
+
+Liest die Historie aus MetaTrader 5 und schickt sie hierher. Läuft unter
+Wine auf dem Ubuntu-Dauerrechner — ausführlich in
+[`collector/README.md`](../collector/README.md).
+
+**Kein Expert Advisor.** Das ist für Prop-Konten der Punkt: Alpha Capital
+verlangt für jeden EA vorherige Genehmigung. Ein EA läuft im Terminal und
+kann handeln; der Sammler ist ein externes Programm, das über die offizielle
+Python-Anbindung liest. Mit dem **Investor-Passwort** — dem Lesezugang —
+kann er nachweislich nicht handeln.
+
+Er rechnet nichts. Verbinden, Historie abrufen, JSON schicken; Umwandlung,
+Round-Trips und Kennzahlen passieren alle hier. Der Grund: Wine plus ein
+fremdes Python plus ein Terminal, das sich neu startet, ist das brüchigste
+Stück der Kette. Was dort nicht steht, kann dort nicht kaputtgehen.
+
+Sein Zugang ist eine eigene Marke (`scripts/marke.py`), keine
+Browser-Sitzung. Sie steht dauerhaft in einer Datei auf dem Dauerrechner und
+darf deshalb **nur einliefern, nicht lesen**: Wer sie findet, kommt damit
+weder an Notizen noch an Kontostände. Sie gilt zudem für genau ein Konto —
+das Zielkonto steht an der Marke, nicht in der Lieferung, lässt sich also
+nicht umbiegen.
+
+### Die Zeitfalle
+
+MT5 liefert Zeitstempel in der Zeitzone des Broker-Servers, nicht in UTC.
+Alpha Capital fährt auf EET/EEST, also UTC+2 im Winter und UTC+3 im Sommer.
+Ohne Korrektur landet jeder Trade zwei bis drei Stunden zu spät — und zwar
+in jeder Ansicht gleich, also unauffällig. Der Kalender ordnet Trades kurz
+nach Mitternacht dem falschen Tag zu, die Auswertung nach Uhrzeit misst eine
+Stunde, in der nie gehandelt wurde, und der Tagesverlust-Puffer rechnet mit
+dem falschen Tag.
+
+Der Versatz wird deshalb **je Lauf gemessen**, nicht eingetragen — der
+Sommerzeitwechsel des Brokers erledigt sich damit von selbst. Gemessen wird
+an einem Kurs-Tick, aber nur bei offenem Markt: Aus einem einzelnen Tick
+lässt sich sein eigenes Alter nicht ablesen, und ein 20 Minuten alter ergibt
+einen sauber gerundeten, plausiblen und falschen Versatz (nachgemessen:
++1,75 h statt +2,00 h). Der Sammler prüft darum mit zwei Ticks im Abstand
+von anderthalb Sekunden, ob überhaupt Kurse hereinkommen.
+
+Ist der Markt zu, meldet er `null`, und der zuletzt bekannte Versatz gilt
+weiter. Auf null zurückzufallen hiesse zu behaupten, der Server laufe auf
+UTC.
+
+Gespeichert werden beide Zeiten: `time_utc` zum Rechnen, `time_broker` zum
+Anzeigen.
+
+### Ohne MT5 prüfen
+
+```bash
+python collector/probelauf.py        # Markt offen
+python collector/probelauf.py --zu   # Markt geschlossen
+```
+
+Legt ein nachgebautes `MetaTrader5` in den Modulcache und lässt `sammler.py`
+unverändert dagegen laufen: Felder auslesen, Lebendprüfung, Stops aus den
+Orders nachtragen, Lieferung, Wiederholbarkeit. Was es nicht prüfen kann,
+ist, ob das echte Terminal dieselben Felder liefert — der erste Lauf gehört
+gegen ein Demo-Konto.
 
 ## Anmeldung
 
@@ -354,10 +422,11 @@ damit den Zurücksetzen-Effekt auslöste.
 
 Damit der Stand nicht besser klingt, als er ist:
 
-- **Der MT5-Sammler.** Der automatische Abgleich ist entworfen
-  (`sync/source.py` steht, mit Überlappungsfenster gegen verpasste Deals),
-  aber der Sammler unter Wine auf dem Ubuntu-Dauerrechner ist nicht gebaut.
-  Bis dahin füllt der CSV-Import.
+- **Der erste Lauf des Sammlers an einem echten MT5.** Er ist gebaut und
+  gegen ein nachgebautes MT5 durchgemessen (`collector/probelauf.py`), aber
+  ob das echte Terminal dieselben Felder unter denselben Namen liefert und
+  ob die Annahme über die Zeitzone am Server von Alpha Capital stimmt, lässt
+  sich nur dort prüfen. Der erste Lauf gehört gegen ein Demo-Konto.
 - **Playbook-Seiten.** Playbooks lassen sich einem Trade zuordnen und über
   `/api/playbooks` lesen, aber nicht in der Oberfläche anlegen oder
   bearbeiten — und die Regel-Häkchen je Trade werden noch nicht gespeichert.
@@ -371,7 +440,7 @@ Damit der Stand nicht besser klingt, als er ist:
 
 ## Als Nächstes
 
-1. **MT5-Sammler** unter Wine. Bewusst ohne Logik: Er liest die Historie und
-   schickt JSON. Was dort nicht steht, kann dort nicht kaputtgehen.
+1. **Sammler an ein echtes Demo-Konto hängen** und die Uhrzeiten gegen das
+   Terminal prüfen. Das ist der einzige verbliebene ungeprüfte Punkt.
 2. **Deployment**: systemd-Dienste für API und Oberfläche, Caddy davor.
 3. **Playbook-Seiten** samt Regel-Häkchen je Trade.
