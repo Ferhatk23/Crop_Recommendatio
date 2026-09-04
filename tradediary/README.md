@@ -126,6 +126,46 @@ Nachkommastellen. Zwei verschiedene Antworten auf fehlendes Wissen:
 Im Betrieb kommen beide Angaben aus `symbol_info()` von MT5 und überschreiben
 die Tabelle.
 
+## Schreiben — was der Nutzer hinterlässt
+
+Notiz am Trade, Tags, Playbook-Zuordnung, Tagesnotiz und Verfassung.
+Drei Festlegungen gelten für alles davon:
+
+- **PATCH ändert nur, was dasteht.** Ein weggelassenes Feld bleibt, wie es
+  war; ein ausdrückliches `null` löscht. Ohne die Unterscheidung könnte die
+  Oberfläche keine Notiz speichern, ohne zugleich das Playbook zu leeren.
+- **Die Tag-Liste wird als Ganzes gesetzt** (`PUT`), nicht einzeln ergänzt.
+  Zweimal geschickt ergibt zweimal dasselbe; ein doppelter Klick kann nichts
+  anrichten.
+- **Nur Selbstgeschriebenes ist schreibbar.** Kein Endpunkt fasst eine
+  gerechnete Größe an. Die kommen aus den Deals und würden beim nächsten
+  Abgleich ohnehin überschrieben — bis dahin stünde eine Zahl in der
+  Auswertung, die zu keinem Deal gehört.
+
+Der Speicherzustand ist in der Oberfläche immer sichtbar, und gespeichert
+wird ausdrücklich. Alles andere auf dem Bildschirm wächst aus den Deals
+nach; eine Notiz gibt es genau einmal. Ein Auto-Save, der scheitert, sieht
+aus wie einer, der klappt.
+
+### Auswertung nach Tags
+
+`/api/reports/setup`, `/fehler`, `/emotion` und `/tag`. Sie unterscheiden
+sich von den anderen Rubriken in zwei Punkten, und beide stehen in der
+Antwort:
+
+- `overlapping: true` — ein Trade kann mehrere Tags tragen und zählt dann
+  in mehreren Gruppen. Die Gruppen ergeben zusammen mehr als die Zahl der
+  Trades. Wer das nicht sagt, lässt den Leser eine falsche Summe bilden.
+- Trades **ohne** Tag bekommen eine eigene Gruppe. Ließe man sie weg, sähe
+  der Report aus wie eine Aussage über alle Trades, beschriebe aber nur die
+  schon eingeordneten. „Breakout verdient Geld" stimmte dann vielleicht nur,
+  weil die schlechten Breakouts nie getaggt wurden — die stillste Art, sich
+  selbst zu belügen.
+
+Tags ohne Trade stehen nicht in den Vorschlägen: Die Liste ist zum
+Wiederverwenden da. Gelöscht wird trotzdem nichts — wer die Bezeichnung
+erneut tippt, bekommt dieselbe Marke wieder.
+
 ## Die Oberfläche
 
 Zwei Regeln tragen den ganzen Entwurf:
@@ -177,8 +217,9 @@ Auflösung nach.
 ### Die Oberfläche im Browser prüfen
 
 ```bash
-cd web && node tools/pruefe-oberflaeche.mjs            # prüfen
+cd web && node tools/pruefe-oberflaeche.mjs            # Darstellung
 cd web && node tools/pruefe-oberflaeche.mjs --bilder   # zusätzlich Screenshots
+cd web && node tools/pruefe-schreiben.mjs              # Speichern und Wiederfinden
 ```
 
 Braucht Playwright (`npm install --no-save playwright`) und eine laufende
@@ -198,6 +239,14 @@ Die Trade-Liste hatte zwischen 720 und 1099 px eine tote Zone. Und das Raster
 sprengte auf dem Telefon den Bildschirm um 87 px, weil `1fr` eine Spalte nicht
 schmaler werden lässt als ihr breitester unteilbarer Inhalt.
 
+`pruefe-schreiben.mjs` geht die Schreibwege im Browser durch: tippen,
+speichern, Seite neu laden, wiederfinden. Ein Test gegen die API sagt, dass
+der Endpunkt speichert — nicht, ob die Schaltfläche ihn trifft und die
+Anzeige den Erfolg meldet. Auch das steht dort wegen eines echten Fehlers:
+Die Meldung „gespeichert" verschwand im selben Augenblick, in dem sie
+erscheinen sollte, weil die Seite den gespeicherten Wert zurückreichte und
+damit den Zurücksetzen-Effekt auslöste.
+
 ## Was noch nicht da ist
 
 Damit der Stand nicht besser klingt, als er ist:
@@ -206,18 +255,19 @@ Damit der Stand nicht besser klingt, als er ist:
   (`sync/source.py` steht, mit Überlappungsfenster gegen verpasste Deals),
   aber der Sammler unter Wine auf dem Ubuntu-Dauerrechner ist nicht gebaut.
   Bis dahin füllt der CSV-Import.
-- **Schreiben aus der Oberfläche.** Notizen, Tags und Playbook-Zuordnung
-  werden angezeigt und beim Neuberechnen erhalten, sind aber noch nicht
-  bearbeitbar. Die API hat dafür noch keine schreibenden Endpunkte.
-- **Playbook-Seiten, Einstellungen, Einrichtung.**
+- **Playbook-Seiten.** Playbooks lassen sich einem Trade zuordnen und über
+  `/api/playbooks` lesen, aber nicht in der Oberfläche anlegen oder
+  bearbeiten — und die Regel-Häkchen je Trade werden noch nicht gespeichert.
+- **Einstellungen und Einrichtung.** Konten, Limits und Spaltenzuordnung für
+  den CSV-Import stehen nur in der Datenbank, nicht in der Oberfläche.
 - **Login.** Es gibt ein `User`-Schema, aber keine Anmeldung. Bis die steht,
   darf die App nicht offen im Netz stehen.
 - **Deployment.**
 
 ## Als Nächstes
 
-1. **Schreibende Endpunkte** für Notiz, Tags und Playbook — das ist der
-   kürzeste Weg von „zeigt Daten an" zu „ist ein Journal".
-2. **MT5-Sammler** unter Wine. Bewusst ohne Logik: Er liest die Historie und
+1. **MT5-Sammler** unter Wine. Bewusst ohne Logik: Er liest die Historie und
    schickt JSON. Was dort nicht steht, kann dort nicht kaputtgehen.
-3. **Login und Deployment.**
+2. **Login und Deployment.** Ohne Anmeldung darf die App nicht offen im Netz
+   stehen — das ist die Bedingung, bevor sie vom iPad aus erreichbar wird.
+3. **Playbook-Seiten** samt Regel-Häkchen je Trade.

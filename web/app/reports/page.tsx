@@ -23,6 +23,11 @@ const RUBRIKEN = [
   { id: 'duration', label: 'Haltedauer' },
   { id: 'volume', label: 'Lot-Größe' },
   { id: 'direction', label: 'Seite' },
+  // Die drei Rubriken, für die man überhaupt taggt. Alles darüber
+  // beschreibt den Markt, das hier beschreibt den Händler.
+  { id: 'setup', label: 'Setup' },
+  { id: 'fehler', label: 'Fehler' },
+  { id: 'emotion', label: 'Verfassung' },
 ];
 
 const BESCHRIFTUNG: Record<string, (k: string) => string> = {
@@ -90,6 +95,29 @@ export default function ReportsSeite() {
           style={{ width: 80 }}
         />
       </div>
+
+      {/* Bei Tag-Rubriken zählt ein Trade in mehreren Gruppen -- und
+          Trades ohne Tag bilden eine eigene. Beides muss dastehen: Wer
+          die Gruppen zusammenzählt, käme sonst auf mehr Trades als es
+          gibt, und wer die Gruppe "ohne" übersieht, hält eine Aussage
+          über den beschrifteten Teil für eine über alle. */}
+      {bericht.daten?.overlapping && (
+        <p
+          style={{
+            fontSize: 11,
+            color: 'var(--td-neutral)',
+            margin: '10px 0 0',
+            paddingLeft: 10,
+            borderLeft: '2px solid var(--td-line)',
+          }}
+        >
+          Ein Trade kann mehrere Tags tragen und zählt dann in mehreren
+          Gruppen — die Gruppen ergeben zusammen mehr als die{' '}
+          {zahl(bericht.daten.total_trades)} Trades. Nicht beschriftete Trades
+          stehen unter „ohne“; sie gehören zum Bild, sonst beschreibt der
+          Report nur den Teil, den du schon eingeordnet hast.
+        </p>
+      )}
 
       <div className="td-card" style={{ marginTop: 12 }}>
         {bericht.fehler ? (

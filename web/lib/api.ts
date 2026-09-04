@@ -93,10 +93,46 @@ export interface Overview {
   sync: SyncState;
 }
 
+export type TagKind = 'setup' | 'fehler' | 'emotion';
+
+/** Die drei Arten, an der Form unterscheidbar — nicht nur an der Farbe. */
+export const TAG_ARTEN: { id: TagKind; label: string }[] = [
+  { id: 'setup', label: 'Setup' },
+  { id: 'fehler', label: 'Fehler' },
+  { id: 'emotion', label: 'Emotion' },
+];
+
 export interface Tag {
   id: number;
   label: string;
-  kind: 'setup' | 'fehler' | 'emotion';
+  kind: TagKind;
+}
+
+/** Ein bereits vergebener Tag, mit Häufigkeit — für die Vorschläge. */
+export interface TagVorschlag extends Tag {
+  count: number;
+}
+
+export interface JournalEintrag {
+  date: string;
+  body: string;
+  mood: number | null;
+  updated_at: string | null;
+}
+
+export interface PlaybookRegel {
+  id: number;
+  group: string;
+  text: string;
+  /** Abhakbar, also eine echte Vorbedingung — nicht bloß ein Merksatz. */
+  checkable: boolean;
+}
+
+export interface Playbook {
+  id: number;
+  name: string;
+  description: string | null;
+  rules: PlaybookRegel[];
 }
 
 export interface Trade {
@@ -185,6 +221,12 @@ export interface Report {
   min_sample: number;
   groups: ReportGroup[];
   total_trades: number;
+  /**
+   * Wahr bei Tag-Rubriken: Ein Trade kann in mehreren Gruppen zählen,
+   * die Gruppen sind also keine Aufteilung. Die Oberfläche muss das
+   * sagen, sonst addiert der Leser sie zu einer falschen Summe.
+   */
+  overlapping: boolean;
 }
 
 export interface Filters {
@@ -244,4 +286,59 @@ export const api = {
 
   symbols: (account_id?: number | null) =>
     hole<string[]>(`/api/symbols${query({ account_id })}`),
+
+  /* --- Schreiben ------------------------------------------------------ */
+
+  /**
+   * Ändert nur die mitgegebenen Felder.
+   *
+   * Deshalb `Partial`: Ein weggelassenes Feld bleibt auf dem Server, wie
+   * es war. Wer hier `{ note }` schickt, fasst die Playbook-Zuordnung
+   * nicht an — und umgekehrt.
+   */
+  trade_aendern: (
+    id: number,
+    aenderung: { note?: string | null; playbook_id?: number | null },
+  ) =>
+    // Antwort ist der Trade *ohne* Ausführungen: Die ändern sich beim
+    // Schreiben nicht, und sie nachzuliefern wäre eine Abfrage für
+    // Daten, die der Aufrufer schon hat.
+    hole<Trade>(`/api/trades/${id}`, {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(aenderung),
+    }),
+
+  /**
+   * Setzt die Tags auf genau diese Liste.
+   *
+   * Die vollständige Liste statt einzelner Zugriffe: Zweimal geschickt
+   * ergibt zweimal dasselbe. Ein doppelter Klick kann so nichts anrichten.
+   */
+  tags_setzen: (id: number, tags: { label: string; kind: TagKind }[]) =>
+    hole<Trade>(`/api/trades/${id}/tags`, {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ tags }),
+    }),
+
+  tags: (account_id?: number | null) =>
+    hole<TagVorschlag[]>(`/api/tags${query({ account_id })}`),
+
+  journal: (tag: string, account_id: number) =>
+    hole<JournalEintrag>(`/api/journal/${tag}${query({ account_id })}`),
+
+  journal_schreiben: (
+    tag: string,
+    account_id: number,
+    eintrag: { body: string; mood?: number | null },
+  ) =>
+    hole<JournalEintrag>(`/api/journal/${tag}${query({ account_id })}`, {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(eintrag),
+    }),
+
+  playbooks: (account_id?: number | null) =>
+    hole<Playbook[]>(`/api/playbooks${query({ account_id })}`),
 };

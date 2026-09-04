@@ -172,14 +172,35 @@ def trades_neu_berechnen(session: Session, account_id: int) -> int:
     deals = [deal_zu_kern(z) for z in zeilen]
 
     # Notizen, Tags und Playbook-Zuordnung hängen am Trade und dürfen einen
-    # Neuaufbau überleben. Sie werden über die position_id wiedergefunden.
-    bewahrt = {
-        t.position_id: (t.note, t.playbook_id)
-        for t in session.scalars(
-            select(db.Trade).where(db.Trade.account_id == account_id)
-        ).all()
+    # Neuaufbau überleben. Sie werden über die position_id wiedergefunden --
+    # die ist die einzige Größe, die ein Neuaufbau unverändert lässt.
+    #
+    # Die Tag-Verknüpfungen müssen dabei ausdrücklich mitgeführt werden.
+    # `Trade.tags` trägt zwar `cascade="all, delete-orphan"`, aber das ist
+    # eine ORM-Regel: Sie greift bei `session.delete(trade)` und wird von
+    # einem Bulk-DELETE wie dem unten übergangen. Ohne die Zeilen hier
+    # blieben Verknüpfungen zurück, die auf gelöschte IDs zeigen -- und
+    # SQLite vergibt nach einem vollständigen Löschen wieder ab 1.
+    #
+    # Nachgemessen, nicht vermutet: Ein Tag auf Gold (position 300, ID 3)
+    # hing nach einem Nachimport älterer Historie an EURUSD (position 100),
+    # weil das nach der Neuvergabe die ID 3 war. Genau der schlimmste
+    # Fehler, den ein Journal machen kann -- er sieht nach nichts aus und
+    # verfälscht still die Auswertung nach Setup.
+    alte = session.scalars(
+        select(db.Trade).where(db.Trade.account_id == account_id)
+    ).all()
+    bewahrt = {t.position_id: (t.note, t.playbook_id) for t in alte}
+    bewahrte_tags = {
+        t.position_id: [tt.tag_id for tt in t.tags] for t in alte if t.tags
     }
 
+    if alte:
+        session.execute(
+            delete(db.TradeTag).where(
+                db.TradeTag.trade_id.in_([t.id for t in alte])
+            )
+        )
     session.execute(delete(db.Trade).where(db.Trade.account_id == account_id))
 
     # Über die position_id des Brokers, wenn sie etwas hergibt -- sonst über
@@ -189,6 +210,7 @@ def trades_neu_berechnen(session: Session, account_id: int) -> int:
         trades_from_positions(deals) if hat_positionen else trades_from_executions(deals)
     )
 
+    neue: list[tuple[int, db.Trade]] = []
     for t in trades:
         note, playbook_id = bewahrt.get(t.position_id, (None, None))
         # Das R-Multiple ist die einzige Größe, die der Broker nicht
@@ -199,29 +221,36 @@ def trades_neu_berechnen(session: Session, account_id: int) -> int:
             t.risk_amount = instruments.risiko(
                 t.symbol, t.avg_entry, t.initial_sl, t.volume
             )
-        session.add(
-            db.Trade(
-                account_id=account_id,
-                position_id=t.position_id or 0,
-                symbol=t.symbol,
-                direction=t.direction.value,
-                opened_at=t.opened_at,
-                closed_at=t.closed_at,
-                volume=t.volume,
-                exit_volume=t.exit_volume,
-                avg_entry=t.avg_entry,
-                avg_exit=t.avg_exit,
-                gross_pnl=t.gross_pnl,
-                costs=t.costs,
-                net_pnl=t.net_pnl,
-                initial_sl=t.initial_sl,
-                risk_amount=t.risk_amount,
-                r_multiple=t.r_multiple,
-                partial=t.partial,
-                note=note,
-                playbook_id=playbook_id,
-            )
+        zeile = db.Trade(
+            account_id=account_id,
+            position_id=t.position_id or 0,
+            symbol=t.symbol,
+            direction=t.direction.value,
+            opened_at=t.opened_at,
+            closed_at=t.closed_at,
+            volume=t.volume,
+            exit_volume=t.exit_volume,
+            avg_entry=t.avg_entry,
+            avg_exit=t.avg_exit,
+            gross_pnl=t.gross_pnl,
+            costs=t.costs,
+            net_pnl=t.net_pnl,
+            initial_sl=t.initial_sl,
+            risk_amount=t.risk_amount,
+            r_multiple=t.r_multiple,
+            partial=t.partial,
+            note=note,
+            playbook_id=playbook_id,
         )
+        session.add(zeile)
+        neue.append((t.position_id or 0, zeile))
+
+    # Erst nach dem Flush stehen die neuen IDs fest -- vorher gäbe es
+    # nichts, woran die Verknüpfungen hängen könnten.
+    session.flush()
+    for position_id, zeile in neue:
+        for tag_id in bewahrte_tags.get(position_id, ()):
+            session.add(db.TradeTag(trade_id=zeile.id, tag_id=tag_id))
 
     session.commit()
     return len(trades)
@@ -278,14 +307,21 @@ def aufnehmen(
 # Abfragen
 # ---------------------------------------------------------------------------
 
-def trades_laden(
+def zeilen_laden(
     session: Session,
     account_id: int | None = None,
     von: datetime | None = None,
     bis: datetime | None = None,
     symbol: str | None = None,
     direction: str | None = None,
-) -> list[KernTrade]:
+) -> list[db.Trade]:
+    """Die gefilterten Trades als Datenbankzeilen.
+
+    Der Kern kennt keine Tags und kein Playbook -- das sind Zutaten des
+    Nutzers, keine des Handels. Wer danach auswerten will, braucht die
+    Zeile; wer rechnen will, den Kern. Deshalb zwei Wege auf dieselbe
+    Abfrage statt einer Dataclass, die beides vermischt.
+    """
     frage = select(db.Trade)
     if account_id is not None:
         frage = frage.where(db.Trade.account_id == account_id)
@@ -298,8 +334,21 @@ def trades_laden(
     if direction:
         frage = frage.where(db.Trade.direction == direction)
 
-    frage = frage.order_by(db.Trade.opened_at.desc())
-    return [trade_zu_kern(z) for z in session.scalars(frage).all()]
+    return list(session.scalars(frage.order_by(db.Trade.opened_at.desc())).all())
+
+
+def trades_laden(
+    session: Session,
+    account_id: int | None = None,
+    von: datetime | None = None,
+    bis: datetime | None = None,
+    symbol: str | None = None,
+    direction: str | None = None,
+) -> list[KernTrade]:
+    return [
+        trade_zu_kern(z)
+        for z in zeilen_laden(session, account_id, von, bis, symbol, direction)
+    ]
 
 
 def kennzahlen(session: Session, **filter) -> kern_metrics.Metrics:

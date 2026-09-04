@@ -11,16 +11,13 @@
  * Ausstieg früh kam.
  */
 
-import { use } from 'react';
+import { use, useEffect, useState } from 'react';
 import Link from 'next/link';
-import { useDaten } from '../../../components/AppState';
+import { useApp, useDaten } from '../../../components/AppState';
 import { PageHead } from '../../../components/Shell';
-import {
-  DirectionPill,
-  EmptyState,
-  TagChip,
-} from '../../../components/primitives';
-import { api, type Execution } from '../../../lib/api';
+import { NotizFeld, TagFeld } from '../../../components/Schreiben';
+import { DirectionPill, EmptyState } from '../../../components/primitives';
+import { api, type Execution, type TradeDetail as TradeDetailDaten } from '../../../lib/api';
 import { outcome } from '../../../lib/outcome';
 import {
   STRICH,
@@ -199,7 +196,18 @@ export default function TradeDetail({
   params: Promise<{ id: string }>;
 }) {
   const { id } = use(params);
+  const { accountId } = useApp();
   const trade = useDaten(() => api.trade(Number(id)), [id]);
+  const vorschlaege = useDaten(() => api.tags(accountId), [accountId]);
+
+  // Der Trade wird nach dem Laden lokal gehalten, weil die
+  // Schreib-Endpunkte den vollständigen Trade zurückgeben. Ein erneutes
+  // Laden nach jedem Speichern wäre eine Anfrage mehr für eine Antwort,
+  // die schon da ist -- und ein Flackern obendrein.
+  const [t, setT] = useState<TradeDetailDaten | null>(null);
+  useEffect(() => {
+    if (trade.daten) setT(trade.daten);
+  }, [trade.daten]);
 
   if (trade.fehler) {
     return (
@@ -209,7 +217,7 @@ export default function TradeDetail({
       </>
     );
   }
-  if (trade.laedt || !trade.daten) {
+  if (trade.laedt || !t) {
     return (
       <>
         <PageHead title="Trade" />
@@ -218,7 +226,6 @@ export default function TradeDetail({
     );
   }
 
-  const t = trade.daten;
   const o = outcome(t.net_pnl);
 
   return (
@@ -421,32 +428,29 @@ export default function TradeDetail({
 
       {/* Tags */}
       <section className="td-section">
-        <span className="td-label">Tags</span>
-        <div
-          style={{ display: 'flex', gap: 6, flexWrap: 'wrap', marginTop: 8 }}
-        >
-          {t.tags.length ? (
-            t.tags.map((tag) => <TagChip key={tag.id} tag={tag} />)
-          ) : (
-            <span style={{ color: 'var(--td-neutral)', fontSize: 12 }}>
-              Noch keine Tags vergeben.
-            </span>
-          )}
-        </div>
+        <TagFeld
+          tags={t.tags}
+          vorschlaege={vorschlaege.daten ?? []}
+          onSpeichern={async (liste) => {
+            const neu = await api.tags_setzen(t.id, liste);
+            // Die geänderten Felder auf den bekannten Trade legen. Die
+            // Ausführungen bleiben, wo sie sind -- Schreiben ändert sie nicht.
+            setT((alt) => (alt ? { ...alt, ...neu } : alt));
+          }}
+        />
       </section>
 
       {/* Notiz */}
       <section className="td-section">
-        <span className="td-label">Notiz</span>
-        <div className="td-card" style={{ marginTop: 6 }}>
-          {t.note ? (
-            <p style={{ margin: 0, whiteSpace: 'pre-wrap' }}>{t.note}</p>
-          ) : (
-            <span style={{ color: 'var(--td-neutral)', fontSize: 12 }}>
-              Noch keine Notiz zu diesem Trade.
-            </span>
-          )}
-        </div>
+        <NotizFeld
+          wert={t.note ?? ''}
+          onSpeichern={async (text) => {
+            const neu = await api.trade_aendern(t.id, { note: text || null });
+            // Die geänderten Felder auf den bekannten Trade legen. Die
+            // Ausführungen bleiben, wo sie sind -- Schreiben ändert sie nicht.
+            setT((alt) => (alt ? { ...alt, ...neu } : alt));
+          }}
+        />
       </section>
     </>
   );

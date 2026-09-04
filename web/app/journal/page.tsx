@@ -7,9 +7,10 @@
  * Tag ein guter Tag war oder eine gerettete Katastrophe.
  */
 
-import { useMemo, useState } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import { useApp, useDaten } from '../../components/AppState';
 import { PageHead } from '../../components/Shell';
+import { NotizFeld, StimmungsWahl } from '../../components/Schreiben';
 import { TradeList } from '../../components/TradeList';
 import { EmptyState, KpiTile } from '../../components/primitives';
 import { api } from '../../lib/api';
@@ -178,12 +179,117 @@ export default function JournalSeite() {
       </section>
 
       <section className="td-section">
-        <span className="td-label">Tagesnotiz</span>
-        <div className="td-card" style={{ marginTop: 6, color: 'var(--td-neutral)' }}>
-          Notizen werden mit der Schreib-Schnittstelle nachgereicht — bisher
-          liest die App nur.
-        </div>
+        <Tagesnotiz datum={gewaehlt.datum} accountId={accountId} />
       </section>
+    </>
+  );
+}
+
+/**
+ * Die Notiz zu einem Handelstag.
+ *
+ * Eigene Komponente, damit der Wechsel des Tages sie neu lädt — und
+ * damit die Notiz des einen Tages niemals im Feld des nächsten steht.
+ */
+function Tagesnotiz({
+  datum,
+  accountId,
+}: {
+  datum: string;
+  accountId: number | null;
+}) {
+  const eintrag = useDaten(
+    () => (accountId ? api.journal(datum, accountId) : Promise.resolve(null)),
+    [datum, accountId],
+  );
+  const [stimmung, setStimmung] = useState<number | null>(null);
+  const [stimmungsFehler, setStimmungsFehler] = useState<string | null>(null);
+
+  useEffect(() => {
+    setStimmung(eintrag.daten?.mood ?? null);
+    setStimmungsFehler(null);
+  }, [eintrag.daten]);
+
+  if (!accountId) return null;
+  if (eintrag.fehler) {
+    return (
+      <>
+        <span className="td-label">Tagesnotiz</span>
+        <div className="td-card" style={{ marginTop: 6, color: 'var(--td-neg)' }}>
+          ⚠ {eintrag.fehler}
+        </div>
+      </>
+    );
+  }
+  if (eintrag.laedt || !eintrag.daten) {
+    return (
+      <>
+        <span className="td-label">Tagesnotiz</span>
+        <div style={{ marginTop: 6, color: 'var(--td-neutral)' }}>lädt …</div>
+      </>
+    );
+  }
+
+  const daten = eintrag.daten;
+
+  const stimmungSetzen = async (wert: number | null) => {
+    const vorher = stimmung;
+    setStimmung(wert);
+    setStimmungsFehler(null);
+    try {
+      await api.journal_schreiben(datum, accountId, {
+        body: daten.body,
+        mood: wert,
+      });
+    } catch (e) {
+      // Zurück auf den letzten bestätigten Stand: Eine Anzeige, die
+      // etwas anderes zeigt als der Server hat, ist schlimmer als gar keine.
+      setStimmung(vorher);
+      setStimmungsFehler(
+        e instanceof Error ? e.message : 'Speichern fehlgeschlagen',
+      );
+    }
+  };
+
+  return (
+    <>
+      <div
+        style={{
+          display: 'flex',
+          justifyContent: 'space-between',
+          alignItems: 'center',
+          flexWrap: 'wrap',
+          columnGap: 12,
+          rowGap: 6,
+          marginBottom: 8,
+        }}
+      >
+        <span className="td-label">Verfassung an diesem Tag</span>
+        <StimmungsWahl wert={stimmung} onWahl={(w) => void stimmungSetzen(w)} />
+      </div>
+      {stimmungsFehler && (
+        <div
+          role="status"
+          style={{
+            fontSize: 11,
+            color: 'var(--td-neg)',
+            fontWeight: 600,
+            marginBottom: 8,
+          }}
+        >
+          ⚠ {stimmungsFehler}
+        </div>
+      )}
+
+      <NotizFeld
+        label={`Tagesnotiz · ${datum}`}
+        wert={daten.body}
+        zeilen={8}
+        platzhalter="Wie war der Tag? Was lief nach Plan, was nicht? Was nimmst du morgen mit?"
+        onSpeichern={(text) =>
+          api.journal_schreiben(datum, accountId, { body: text, mood: stimmung })
+        }
+      />
     </>
   );
 }

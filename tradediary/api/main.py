@@ -23,7 +23,7 @@ from decimal import Decimal
 from fastapi import Depends, FastAPI, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
-from sqlalchemy import func, select
+from sqlalchemy import delete, func, select
 from sqlalchemy.orm import Session
 
 from ..core import instruments, metrics as kern_metrics, rules, score as kern_score
@@ -37,6 +37,7 @@ from ..db.repository import (
     session_factory,
     trade_zu_kern,
     trades_laden,
+    zeilen_laden,
 )
 from ..sources.csv_source import importiere
 
@@ -551,6 +552,41 @@ def _volumenklasse(t) -> str:
     return ">2.1"
 
 
+# Dimensionen, bei denen ein Trade in *mehrere* Gruppen fällt.
+#
+# Tags sind der Grund, warum es diese zweite Sorte gibt: Ein Trade kann
+# zwei Setups tragen oder keins. Damit ist die Gruppierung keine
+# Aufteilung mehr, und zwei Dinge müssen ausdrücklich geregelt sein:
+#
+# * Die Summe der Gruppengrößen ist größer als die Zahl der Trades. Die
+#   Antwort sagt das mit `overlapping`, damit die Oberfläche nicht den
+#   Eindruck einer Aufteilung erweckt.
+# * Trades ohne Tag bekommen eine eigene Gruppe. Ließe man sie weg,
+#   beschriebe der Report nur den beschrifteten Teil -- sähe aber aus wie
+#   eine Aussage über alle. Das ist die stillste Art, sich selbst zu
+#   belügen: "Breakout verdient Geld" stimmt dann vielleicht nur, weil
+#   die schlechten Breakouts nie getaggt wurden.
+
+def _tag_schluessel(zeile, art: str | None = None) -> list[str]:
+    marken = [
+        tt.tag for tt in zeile.tags
+        if art is None or (
+            tt.tag.kind.value if hasattr(tt.tag.kind, "value") else tt.tag.kind
+        ) == art
+    ]
+    if not marken:
+        return ["ohne Tag"] if art is None else [f"ohne {art.capitalize()}"]
+    return [m.label for m in marken]
+
+
+MEHRFACH_DIMENSIONEN = {
+    "tag": lambda z: _tag_schluessel(z),
+    "setup": lambda z: _tag_schluessel(z, "setup"),
+    "fehler": lambda z: _tag_schluessel(z, "fehler"),
+    "emotion": lambda z: _tag_schluessel(z, "emotion"),
+}
+
+
 @app.get("/api/reports/{dimension}")
 def report(
     dimension: str,
@@ -565,17 +601,33 @@ def report(
     gekennzeichnet, damit die Oberfläche sie dämpfen und beschriften kann
     -- „Dienstag sieht am besten aus, bei vier Trades ist das Rauschen".
     """
-    if dimension not in DIMENSIONEN:
+    mehrfach = dimension in MEHRFACH_DIMENSIONEN
+    if dimension not in DIMENSIONEN and not mehrfach:
+        verfuegbar = list(DIMENSIONEN) + list(MEHRFACH_DIMENSIONEN)
         raise HTTPException(
-            400, f"Unbekannte Dimension. Verfügbar: {', '.join(DIMENSIONEN)}"
+            400, f"Unbekannte Dimension. Verfügbar: {', '.join(verfuegbar)}"
         )
 
-    schluessel = DIMENSIONEN[dimension]
-    trades = [t for t in trades_laden(session, **f) if not t.is_open]
-
     gruppen: dict[str, list] = {}
-    for t in trades:
-        gruppen.setdefault(schluessel(t), []).append(t)
+
+    if mehrfach:
+        # Über die Zeilen, weil Tags am Trade des Nutzers hängen und
+        # nicht am gerechneten Kern.
+        schluessel_mehrfach = MEHRFACH_DIMENSIONEN[dimension]
+        paare = [
+            (zeile, trade_zu_kern(zeile)) for zeile in zeilen_laden(session, **f)
+        ]
+        trades = [kern for _, kern in paare if not kern.is_open]
+        for zeile, kern in paare:
+            if kern.is_open:
+                continue
+            for name in schluessel_mehrfach(zeile):
+                gruppen.setdefault(name, []).append(kern)
+    else:
+        schluessel = DIMENSIONEN[dimension]
+        trades = [t for t in trades_laden(session, **f) if not t.is_open]
+        for t in trades:
+            gruppen.setdefault(schluessel(t), []).append(t)
 
     heraus = []
     for name, menge in gruppen.items():
@@ -603,6 +655,10 @@ def report(
         "min_sample": min_sample,
         "groups": heraus,
         "total_trades": len(trades),
+        # Bei Tags zählt ein Trade in mehreren Gruppen. Die Oberfläche
+        # muss das sagen können -- sonst rechnet der Leser die Gruppen
+        # zusammen und wundert sich über die Summe.
+        "overlapping": mehrfach,
     }
 
 
@@ -667,6 +723,331 @@ def symbole(
     if account_id:
         frage = frage.where(db.Trade.account_id == account_id)
     return sorted(session.scalars(frage).all())
+
+
+# ---------------------------------------------------------------------------
+# Schreiben
+# ---------------------------------------------------------------------------
+#
+# Ab hier wird die App vom Betrachter zum Journal. Drei Festlegungen, die
+# für alles darunter gelten:
+#
+# * **PATCH ändert nur, was dasteht.** Ein weggelassenes Feld bleibt, wie
+#   es war; ein ausdrückliches `null` löscht. Ohne diese Unterscheidung
+#   könnte die Oberfläche keine Notiz speichern, ohne zugleich das
+#   Playbook zu überschreiben.
+# * **Die Tag-Liste wird als Ganzes gesetzt, nicht einzeln ergänzt.** Ein
+#   PUT mit der vollständigen Liste ist wiederholbar: Zweimal geschickt
+#   ergibt zweimal dasselbe. Bei getrenntem Hinzufügen und Entfernen
+#   hinge das Ergebnis an der Reihenfolge der Aufrufe.
+# * **Geschrieben wird nur, was der Nutzer geschrieben hat.** Kein
+#   Endpunkt hier fasst eine gerechnete Größe an. Die kommen aus den
+#   Deals und werden bei jedem Neuaufbau überschrieben -- eine Änderung
+#   daran wäre beim nächsten Abgleich lautlos wieder weg.
+
+
+class TradeAenderung(BaseModel):
+    """Was an einem Trade von Hand änderbar ist."""
+
+    note: str | None = None
+    playbook_id: int | None = None
+
+
+def _benutzer_von(session: Session, trade: db.Trade) -> int:
+    """Der Besitzer eines Trades, über sein Konto.
+
+    Solange es keine Anmeldung gibt, ist das der einzige belastbare Weg
+    zu einer Nutzer-ID. Tags hängen am Nutzer, nicht am Konto -- wer sein
+    Challenge-Konto verliert und ein neues bekommt, will seine
+    Setup-Namen behalten.
+    """
+    konto = session.get(db.Account, trade.account_id)
+    if konto is None:
+        raise HTTPException(500, "Trade ohne Konto")
+    return konto.user_id
+
+
+@app.patch("/api/trades/{trade_id}")
+def trade_aendern(
+    trade_id: int,
+    aenderung: TradeAenderung,
+    session: Session = Depends(hole_session),
+):
+    """Notiz und Playbook-Zuordnung setzen.
+
+    Nur die Felder, die im Rumpf stehen. `note: null` löscht die Notiz,
+    ein fehlendes `note` lässt sie stehen.
+    """
+    zeile = session.get(db.Trade, trade_id)
+    if zeile is None:
+        raise HTTPException(404, "Trade nicht gefunden")
+
+    gesetzt = aenderung.model_fields_set
+
+    if "note" in gesetzt:
+        text = (aenderung.note or "").strip()
+        if len(text) > 20_000:
+            raise HTTPException(400, "Notiz zu lang (höchstens 20.000 Zeichen)")
+        # Leer heißt "keine Notiz", nicht "eine leere Notiz". Sonst
+        # unterschieden sich zwei Zustände, die für den Nutzer derselbe sind.
+        zeile.note = text or None
+
+    if "playbook_id" in gesetzt:
+        if aenderung.playbook_id is not None:
+            buch = session.get(db.Playbook, aenderung.playbook_id)
+            if buch is None:
+                raise HTTPException(404, "Playbook nicht gefunden")
+            if buch.user_id != _benutzer_von(session, zeile):
+                raise HTTPException(403, "Playbook gehört zu einem anderen Nutzer")
+        zeile.playbook_id = aenderung.playbook_id
+
+    session.commit()
+    session.refresh(zeile)
+    return trade_block(zeile)
+
+
+class TagEingabe(BaseModel):
+    label: str
+    kind: str = "setup"
+
+
+class TagListe(BaseModel):
+    tags: list[TagEingabe]
+
+
+@app.put("/api/trades/{trade_id}/tags")
+def trade_tags_setzen(
+    trade_id: int,
+    liste: TagListe,
+    session: Session = Depends(hole_session),
+):
+    """Setzt die Tags eines Trades auf genau diese Liste.
+
+    Unbekannte Bezeichnungen werden angelegt, bekannte wiederverwendet --
+    sonst stünde dasselbe Setup unter zwei IDs im Report. Doppelte in der
+    Eingabe fallen zusammen.
+    """
+    zeile = session.get(db.Trade, trade_id)
+    if zeile is None:
+        raise HTTPException(404, "Trade nicht gefunden")
+
+    if len(liste.tags) > 20:
+        raise HTTPException(400, "Höchstens 20 Tags je Trade")
+
+    user_id = _benutzer_von(session, zeile)
+
+    gewuenscht: list[tuple[str, db.TagArt]] = []
+    gesehen: set[tuple[str, db.TagArt]] = set()
+    for eingabe in liste.tags:
+        text = eingabe.label.strip()
+        if not text:
+            continue
+        if len(text) > 80:
+            raise HTTPException(400, f"Tag zu lang: {text[:40]}…")
+        try:
+            art = db.TagArt(eingabe.kind)
+        except ValueError:
+            erlaubt = ", ".join(a.value for a in db.TagArt)
+            raise HTTPException(400, f"Unbekannte Tag-Art: {eingabe.kind} ({erlaubt})")
+        schluessel = (text, art)
+        if schluessel in gesehen:
+            continue
+        gesehen.add(schluessel)
+        gewuenscht.append(schluessel)
+
+    ids: list[int] = []
+    for text, art in gewuenscht:
+        marke = session.scalars(
+            select(db.Tag).where(
+                db.Tag.user_id == user_id,
+                db.Tag.label == text,
+                db.Tag.kind == art,
+            )
+        ).first()
+        if marke is None:
+            marke = db.Tag(user_id=user_id, label=text, kind=art)
+            session.add(marke)
+            session.flush()
+        ids.append(marke.id)
+
+    session.execute(delete(db.TradeTag).where(db.TradeTag.trade_id == trade_id))
+    for tag_id in ids:
+        session.add(db.TradeTag(trade_id=trade_id, tag_id=tag_id))
+
+    session.commit()
+    session.refresh(zeile)
+    return trade_block(zeile)
+
+
+@app.get("/api/tags")
+def tags(
+    account_id: int | None = Query(None),
+    ungenutzte: bool = Query(
+        False, description="Auch Tags mitliefern, die an keinem Trade hängen"
+    ),
+    session: Session = Depends(hole_session),
+):
+    """Die bereits vergebenen Tags -- als Vorschläge beim Tippen.
+
+    Mit Anzahl, damit die häufigen oben stehen. Wer bei jedem Trade neu
+    tippt, produziert "Breakout", "breakout" und "Break-out" und hat am
+    Ende drei Zeilen im Report, wo eine hingehört.
+
+    Tags, die an keinem Trade mehr hängen, fehlen hier. Das ist Absicht:
+    Die Liste ist zum Wiederverwenden da, und an einer Bezeichnung mit
+    null Trades gibt es nichts wiederzuverwenden. Sonst sammelte sich
+    dort jeder Tippfehler, den man je vergeben und wieder entfernt hat --
+    nach ein paar Monaten stünden dutzende tote Einträge unter jedem
+    Trade. Gelöscht wird trotzdem nichts: Wer die Bezeichnung erneut
+    tippt, bekommt dieselbe Marke wieder, und die alte Zuordnung im
+    Report bleibt unberührt.
+    """
+    user_id = None
+    if account_id:
+        konto = session.get(db.Account, account_id)
+        if konto is None:
+            raise HTTPException(404, "Konto nicht gefunden")
+        user_id = konto.user_id
+
+    frage = (
+        select(db.Tag, func.count(db.TradeTag.trade_id))
+        .outerjoin(db.TradeTag, db.TradeTag.tag_id == db.Tag.id)
+        .group_by(db.Tag.id)
+        .order_by(func.count(db.TradeTag.trade_id).desc(), db.Tag.label)
+    )
+    if user_id is not None:
+        frage = frage.where(db.Tag.user_id == user_id)
+    if not ungenutzte:
+        frage = frage.having(func.count(db.TradeTag.trade_id) > 0)
+
+    return [
+        {
+            "id": marke.id,
+            "label": marke.label,
+            "kind": marke.kind.value if hasattr(marke.kind, "value") else marke.kind,
+            "count": anzahl,
+        }
+        for marke, anzahl in session.execute(frage).all()
+    ]
+
+
+class JournalEingabe(BaseModel):
+    body: str = ""
+    mood: int | None = None
+
+
+@app.get("/api/journal/{tag}")
+def journal_lesen(
+    tag: str,
+    account_id: int = Query(...),
+    session: Session = Depends(hole_session),
+):
+    """Die Tagesnotiz. Fehlt sie, kommt eine leere zurück, kein 404.
+
+    Ein fehlender Eintrag ist kein Fehler -- die meisten Tage haben
+    keinen. Die Oberfläche soll ein leeres Feld zeigen können, ohne
+    vorher einen Fehlerfall behandeln zu müssen.
+    """
+    try:
+        datum = date.fromisoformat(tag)
+    except ValueError:
+        raise HTTPException(400, f"Datum nicht lesbar: {tag}")
+
+    eintrag = session.scalars(
+        select(db.JournalEntry).where(
+            db.JournalEntry.account_id == account_id,
+            db.JournalEntry.entry_date == datum,
+        )
+    ).first()
+
+    if eintrag is None:
+        return {"date": tag, "body": "", "mood": None, "updated_at": None}
+    return {
+        "date": tag,
+        "body": eintrag.body,
+        "mood": eintrag.mood,
+        "updated_at": (
+            eintrag.updated_at.isoformat() if eintrag.updated_at else None
+        ),
+    }
+
+
+@app.put("/api/journal/{tag}")
+def journal_schreiben(
+    tag: str,
+    eingabe: JournalEingabe,
+    account_id: int = Query(...),
+    session: Session = Depends(hole_session),
+):
+    """Tagesnotiz und Stimmung setzen."""
+    try:
+        datum = date.fromisoformat(tag)
+    except ValueError:
+        raise HTTPException(400, f"Datum nicht lesbar: {tag}")
+
+    if session.get(db.Account, account_id) is None:
+        raise HTTPException(404, "Konto nicht gefunden")
+
+    text = eingabe.body.strip()
+    if len(text) > 50_000:
+        raise HTTPException(400, "Eintrag zu lang (höchstens 50.000 Zeichen)")
+    if eingabe.mood is not None and not 1 <= eingabe.mood <= 5:
+        raise HTTPException(400, "Stimmung liegt zwischen 1 und 5")
+
+    eintrag = session.scalars(
+        select(db.JournalEntry).where(
+            db.JournalEntry.account_id == account_id,
+            db.JournalEntry.entry_date == datum,
+        )
+    ).first()
+
+    if eintrag is None:
+        eintrag = db.JournalEntry(account_id=account_id, entry_date=datum)
+        session.add(eintrag)
+
+    eintrag.body = text
+    eintrag.mood = eingabe.mood
+    eintrag.updated_at = datetime.now(timezone.utc)
+    session.commit()
+    session.refresh(eintrag)
+
+    return {
+        "date": tag,
+        "body": eintrag.body,
+        "mood": eintrag.mood,
+        "updated_at": eintrag.updated_at.isoformat() if eintrag.updated_at else None,
+    }
+
+
+@app.get("/api/playbooks")
+def playbooks(
+    account_id: int | None = Query(None), session: Session = Depends(hole_session)
+):
+    """Die Playbooks samt Regeln -- für die Auswahl am Trade."""
+    frage = select(db.Playbook).order_by(db.Playbook.name)
+    if account_id:
+        konto = session.get(db.Account, account_id)
+        if konto is None:
+            raise HTTPException(404, "Konto nicht gefunden")
+        frage = frage.where(db.Playbook.user_id == konto.user_id)
+
+    return [
+        {
+            "id": b.id,
+            "name": b.name,
+            "description": b.description,
+            "rules": [
+                {
+                    "id": r.id,
+                    "group": r.group_label,
+                    "text": r.text,
+                    "checkable": r.checkable,
+                }
+                for r in sorted(b.rules, key=lambda r: r.sort_order)
+            ],
+        }
+        for b in session.scalars(frage).all()
+    ]
 
 
 def init_db() -> None:

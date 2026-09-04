@@ -65,15 +65,18 @@ def main() -> None:
             print(f"  {konto.label:<26} {neu:>4} Ausfuehrungen -> {anzahl:>3} Trades")
 
         # Tags und ein Playbook, damit die Oberflaeche etwas zu zeigen hat.
-        for label, art in [("Breakout", m.TagArt.SETUP),
-                           ("Pullback", m.TagArt.SETUP),
-                           ("News-Fade", m.TagArt.SETUP),
-                           ("zu frueh raus", m.TagArt.FEHLER),
-                           ("Regel gebrochen", m.TagArt.FEHLER),
-                           ("nachgekauft", m.TagArt.FEHLER),
-                           ("ruhig", m.TagArt.EMOTION),
-                           ("ungeduldig", m.TagArt.EMOTION)]:
-            s.add(m.Tag(user_id=user.id, label=label, kind=art))
+        setups = ["Breakout", "Pullback", "News-Fade"]
+        fehler = ["zu frueh raus", "Regel gebrochen", "nachgekauft"]
+        emotionen = ["ruhig", "ungeduldig"]
+
+        marken: dict[str, m.Tag] = {}
+        for label, art in ([(x, m.TagArt.SETUP) for x in setups]
+                           + [(x, m.TagArt.FEHLER) for x in fehler]
+                           + [(x, m.TagArt.EMOTION) for x in emotionen]):
+            marke = m.Tag(user_id=user.id, label=label, kind=art)
+            s.add(marke)
+            marken[label] = marke
+        s.flush()
 
         pb = m.Playbook(user_id=user.id, name="London Breakout",
                         description="Ausbruch aus der asiatischen Range.")
@@ -92,8 +95,102 @@ def main() -> None:
                                  text=text, checkable=pruefbar, sort_order=i))
         s.commit()
 
+        verteile_beschriftungen(s, marken, pb, setups, fehler, emotionen)
+
         gesamt = s.query(m.Trade).count()
         print(f"\nFertig: {gesamt} Trades in {pfad}")
+
+
+def verteile_beschriftungen(s, marken, pb, setups, fehler, emotionen) -> None:
+    """Haengt Tags, Notizen und Tagesjournale an die erzeugten Trades.
+
+    Ohne das legt der Seed zwar Tags an, vergibt sie aber nie -- und die
+    Auswertung nach Setup bleibt leer, obwohl die Oberflaeche dafuer
+    gebaut ist. Man entwickelt dann an einem Bildschirm, den es im
+    Betrieb nie gibt.
+
+    Zwei Dinge sind hier Absicht:
+
+    * **Nicht jeder Trade bekommt etwas.** Wer sein Journal fuehrt, fuehrt
+      es lueckenhaft. Die Oberflaeche muss den Fall "kein Tag" genauso
+      aushalten wie den anderen -- und man sieht ihn nur, wenn er in den
+      Beispieldaten vorkommt.
+    * **Fehler-Tags haengen ueberwiegend an Verlusten.** Nicht, weil das
+      huebscher aussieht, sondern weil sonst jede Auswertung nach Fehlern
+      flach herauskaeme und man nicht erkennen wuerde, ob sie ueberhaupt
+      etwas misst.
+    """
+    import random
+    from datetime import timezone
+
+    rng = random.Random(4711)
+    trades = s.query(m.Trade).all()
+    verknuepft = 0
+    notizen = 0
+
+    notiztexte = [
+        "Plan war sauber, Ausfuehrung auch. Nichts zu aendern.",
+        "Zu frueh raus. Ziel lag 20 Pips weiter, Angst war schneller.",
+        "Setup war da, aber die Groesse war zu hoch fuer den Abstand.",
+        "Nachgekauft, obwohl die Regel es verbietet. Ist diesmal gutgegangen.",
+        "Kein klares Signal -- eigentlich haette ich nicht handeln duerfen.",
+        "Stop sass richtig, der Markt hat ihn nur gestreift.",
+    ]
+
+    for t in trades:
+        verlust = float(t.net_pnl or 0) < 0
+
+        if rng.random() < 0.72:
+            s.add(m.TradeTag(trade_id=t.id,
+                             tag_id=marken[rng.choice(setups)].id))
+            verknuepft += 1
+
+        # Fehler ueberwiegend bei Verlusten -- sonst misst die Auswertung
+        # nach Fehlern nichts.
+        if rng.random() < (0.42 if verlust else 0.08):
+            s.add(m.TradeTag(trade_id=t.id,
+                             tag_id=marken[rng.choice(fehler)].id))
+            verknuepft += 1
+
+        if rng.random() < 0.3:
+            s.add(m.TradeTag(trade_id=t.id,
+                             tag_id=marken[rng.choice(emotionen)].id))
+            verknuepft += 1
+
+        if rng.random() < 0.22:
+            t.note = rng.choice(notiztexte)
+            notizen += 1
+
+        if rng.random() < 0.35:
+            t.playbook_id = pb.id
+
+    # Tagesjournale fuer einen Teil der Handelstage.
+    tagebuch = 0
+    tagestexte = [
+        "Ruhiger Tag. Zwei Setups gesehen, eins genommen, das war richtig.",
+        "Zu viel gehandelt. Nach dem zweiten Verlust haette ich aufhoeren muessen.",
+        "Guter Rhythmus. Keine Regel gebrochen, Groesse konstant gehalten.",
+        "Schwacher Start, dann gefangen. Das Ergebnis taeuscht ueber den Verlauf.",
+        "Muede angefangen. Merke: an solchen Tagen kleiner anfangen.",
+    ]
+    for konto_id in {t.account_id for t in trades}:
+        tage = sorted({
+            (t.closed_at or t.opened_at).date()
+            for t in trades if t.account_id == konto_id
+        })
+        for tag in tage:
+            if rng.random() < 0.4:
+                s.add(m.JournalEntry(
+                    account_id=konto_id,
+                    entry_date=tag,
+                    body=rng.choice(tagestexte),
+                    mood=rng.choice([2, 3, 3, 4, 4, 5]),
+                ))
+                tagebuch += 1
+
+    s.commit()
+    print(f"  {verknuepft} Tag-Zuordnungen, {notizen} Notizen, "
+          f"{tagebuch} Tagesjournale")
 
 
 if __name__ == "__main__":

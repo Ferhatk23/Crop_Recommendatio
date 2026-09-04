@@ -3,10 +3,20 @@ name = "tradediary"
 version = "0.1.0"
 description = "Trading-Journal mit automatischer Übernahme aus MT5"
 requires-python = ">=3.11"
-dependencies = []
+
+# `core/` selbst kommt ohne all das aus -- reine Logik über Dataclasses,
+# keine Datenbank, kein Netz. Das ist Absicht und soll so bleiben. Was
+# hier steht, brauchen Speicher und Schnittstelle darum herum.
+dependencies = [
+    "fastapi>=0.115",
+    "sqlalchemy>=2.0",
+    "pydantic>=2.7",
+    "uvicorn>=0.30",
+]
 
 [project.optional-dependencies]
-dev = ["pytest>=8.0"]
+# httpx wird von FastAPIs TestClient gebraucht, nicht vom Betrieb.
+dev = ["pytest>=8.0", "httpx>=0.27"]
 
 [build-system]
 requires = ["setuptools>=68"]
