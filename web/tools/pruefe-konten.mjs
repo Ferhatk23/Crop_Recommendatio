@@ -168,9 +168,45 @@ await page.goto(BASIS + '/einstellungen', { waitUntil: 'networkidle' });
 await page.waitForTimeout(1400);
 await page.getByRole('button', { name: 'bearbeiten' }).first().click();
 await page.waitForTimeout(500);
-await page.getByLabel('Gesamtverlust').first().fill('7500');
+
+// Der neue Wert wird aus dem alten abgeleitet, nicht festgeschrieben --
+// und er wechselt zwischen zwei gültigen Werten hin und her.
+//
+// Zwei Anläufe waren nötig. Mit einer festen Zahl lief die Prüfung genau
+// einmal: Beim zweiten Lauf stand sie schon im Feld, nichts änderte sich,
+// und die Prüfung schlug über einen Fehler an, den es nicht gab. Der
+// naheliegende zweite Versuch -- den Wert einfach senken -- drückte ihn
+// unter den Tagesverlust, und der Server lehnte das zu Recht ab.
+// Beides sah nach einem Fehler in der App aus und war einer in der
+// Prüfung.
+const zahlAus = async (feldname) =>
+  Number((await page.getByLabel(feldname).first().inputValue()).replace(',', '.'));
+const tagesLimit = (await zahlAus('Tagesverlust')) || 5000;
+const feld = page.getByLabel('Gesamtverlust').first();
+const alterWert = (await zahlAus('Gesamtverlust')) || tagesLimit * 2;
+// Beide Kandidaten liegen über dem Tageslimit, also nimmt der Server sie
+// an; genommen wird der, der gerade nicht dasteht.
+const neuerWert = alterWert === tagesLimit * 2 ? tagesLimit * 3 : tagesLimit * 2;
+await feld.fill(String(neuerWert));
 await page.getByRole('button', { name: 'Speichern' }).first().click();
 await page.waitForTimeout(2000);
+
+// Ein abgelehntes Speichern sieht sonst genauso aus wie ein wirkungsloser
+// Grenzwert -- und man sucht den Fehler an der falschen Stelle.
+//
+// Auf den *Text* geprüft, nicht auf das Vorhandensein: Next.js hält
+// dauerhaft ein leeres role="alert" für die Routenansage im Dokument.
+// Dieselbe Falle wie oben, und ich bin ein zweites Mal hineingelaufen --
+// die Prüfung meldete eine Ablehnung ohne Meldung.
+const meldungen = (await page.getByRole('alert').allInnerTexts())
+  .map((t) => t.trim())
+  .filter(Boolean);
+pruefe(
+  meldungen.length === 0,
+  meldungen.length
+    ? `das Speichern wurde abgelehnt: ${meldungen[0]}`
+    : 'das Speichern wurde angenommen',
+);
 
 await page.goto(BASIS + '/', { waitUntil: 'networkidle' });
 await page.waitForTimeout(1600);
@@ -180,9 +216,10 @@ pruefe(
   vorher !== nachher,
   `der geänderte Grenzwert schlägt auf das Dashboard durch (${vorher.replace(/\n/g, ' ')} -> ${nachher.replace(/\n/g, ' ')})`,
 );
+const erwartet = neuerWert.toLocaleString('de-DE', { minimumFractionDigits: 2 });
 pruefe(
-  (await page.getByText(/7\.500,00/).count()) > 0,
-  'der neue Wert steht im Puffer',
+  (await page.getByText(erwartet).count()) > 0,
+  `der neue Wert steht im Puffer (${erwartet})`,
 );
 
 /* ------------------------------------------------------------------ */

@@ -355,6 +355,30 @@ export interface Regeltreue {
   self_reported: boolean;
 }
 
+/**
+ * Was an einem Trade noch aussteht.
+ *
+ * Jeder Wert sagt genau eine nachprüfbare Sache. Es gibt bewusst kein
+ * zusammengesetztes „erledigt": Wann ein Trade durchgearbeitet ist, weiß
+ * nur der Händler — eine erfundene Definition stünde am Ende als
+ * Fortschrittsbalken da, der etwas anderes misst, als er behauptet.
+ */
+export type Nacharbeit =
+  | 'unberuehrt'
+  | 'regeln_offen'
+  | 'ohne_notiz'
+  | 'ohne_tag'
+  | 'ohne_playbook';
+
+export const NACHARBEIT: { id: Nacharbeit | ''; label: string }[] = [
+  { id: '', label: 'Alle Trades' },
+  { id: 'unberuehrt', label: 'noch nicht angesehen' },
+  { id: 'regeln_offen', label: 'Regeln offen' },
+  { id: 'ohne_notiz', label: 'ohne Notiz' },
+  { id: 'ohne_tag', label: 'ohne Tag' },
+  { id: 'ohne_playbook', label: 'ohne Playbook' },
+];
+
 export interface Filters {
   account_id?: number | null;
   von?: string | null;
@@ -468,7 +492,14 @@ export const api = {
 
   overview: (f: Filters) => hole<Overview>(`/api/overview${query({ ...f })}`),
 
-  trades: (f: Filters & { limit?: number; offset?: number; outcome?: string }) =>
+  trades: (
+    f: Filters & {
+      limit?: number;
+      offset?: number;
+      outcome?: string;
+      nachbearbeitung?: Nacharbeit | '';
+    },
+  ) =>
     hole<{ total: number; limit: number; offset: number; trades: Trade[] }>(
       `/api/trades${query({ ...f })}`,
     ),

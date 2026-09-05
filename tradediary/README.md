@@ -227,6 +227,39 @@ hin. **Nichts davon wird aus MT5 abgeleitet.** Ein Teil dieser Regeln wäre
 es (»Stop gesetzt« steht in `initial_sl`), aber abgeleitet wird noch
 nichts — die Quote misst, was der Händler über sich notiert hat.
 
+### Wiederfinden, was noch aussteht
+
+Ein Journal führt man abends, nicht während des Handels — und danach muss
+man wiederfinden, wo man stehen geblieben ist. Daran stirbt die
+Gewohnheit: nicht am Aufschreiben, sondern am Suchen. `GET /api/trades`
+nimmt deshalb `nachbearbeitung=` mit fünf Werten:
+
+| Wert | heißt |
+|---|---|
+| `unberuehrt` | weder Notiz noch Tag noch Playbook — nie angesehen |
+| `regeln_offen` | Playbook dran, aber nicht jede abhakbare Regel beantwortet |
+| `ohne_notiz` / `ohne_tag` / `ohne_playbook` | jeweils genau das |
+
+Jeder Wert sagt **eine nachprüfbare Sache**. Es gibt bewusst kein
+zusammengesetztes „erledigt": Wann ein Trade durchgearbeitet ist, weiß nur
+der Händler, und eine erfundene Definition stünde am Ende als
+Fortschrittsbalken da, der etwas anderes misst, als er behauptet.
+
+Zwei Feinheiten, beide mit einem Test dahinter:
+
+- Gefiltert wird **in der Datenbank**, nicht auf der geholten Seite. Ein
+  Filter, der erst nach dem Blättern greift, liefert auf Seite zwei etwas
+  anderes als auf Seite eins — und `total` wäre eine falsche Zahl an genau
+  der Stelle, an der sie als „noch offen" auf dem Schirm steht.
+- Ein Playbook **ohne** abhakbare Regeln kann nichts offen haben. Sonst
+  stünde jeder Trade eines reinen Merksatz-Playbooks für immer auf der
+  Liste, und niemand bekäme ihn je herunter.
+
+Auf der Trade-Seite steht die Zahl der unberührten Trades auch dann da,
+wenn der Filter auf „alle" steht — sonst fände sie nur, wer ohnehin schon
+danach sucht. Sie verschwindet, sobald nichts mehr offen ist; eine
+dauerhafte Null wäre eine Mahnung ohne Anlass.
+
 ### Was beim Ändern nicht verlorengeht
 
 Regeln behalten beim Speichern ihre `id`. Ohne das verlöre jede
@@ -510,8 +543,21 @@ node tools/pruefe-oberflaeche.mjs      # Darstellung auf drei Breiten
 node tools/pruefe-schreiben.mjs        # Speichern und Wiederfinden
 node tools/pruefe-konten.mjs           # Konto anlegen, Grenzwerte, Löschen
 node tools/pruefe-playbooks.mjs        # Playbook, Regel-Häkchen, Regeltreue
+node tools/pruefe-nacharbeit.mjs       # was noch aussteht, wiederfinden
 node tools/pruefe-oberflaeche.mjs --bilder   # zusätzlich Screenshots
 ```
+
+Alle sechs sind **wiederholbar**: Zweimal hintereinander auf derselben
+Datenbank ergibt zweimal grün. Das war nicht von Anfang an so.
+`pruefe-konten.mjs` trug einen festen Grenzwert ein und lief damit genau
+einmal — beim zweiten Lauf stand die Zahl schon im Feld, nichts änderte
+sich, und die Prüfung meldete einen Fehler, den es nicht gab. Der
+naheliegende zweite Anlauf, den Wert einfach zu senken, drückte ihn unter
+den Tagesverlust; der Server lehnte zu Recht ab, und wieder sah es nach
+einem Fehler in der App aus. Jetzt wechselt der Wert zwischen zwei
+gültigen hin und her, und eine eigene Zusicherung sagt es, wenn ein
+Speichern abgelehnt wurde — sonst ist das von einem wirkungslosen
+Grenzwert nicht zu unterscheiden.
 
 Rückgabewert 0 wenn alles stimmt, 1 bei Befunden, 2 wenn die Anmeldung
 scheitert — nachgemessen, nicht angenommen.

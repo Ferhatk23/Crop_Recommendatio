@@ -965,14 +965,100 @@ def trade_block(zeile: db.Trade) -> dict:
     }
 
 
+# ---------------------------------------------------------------------------
+# Was noch nachzuarbeiten ist
+# ---------------------------------------------------------------------------
+#
+# Ein Journal führt man abends, nicht während des Handels -- und danach
+# muss man wiederfinden, was man noch nicht angefasst hat. Ohne diesen
+# Filter scrollt man durch dreihundert Zeilen und rät. Genau daran stirbt
+# die Gewohnheit: nicht am Aufschreiben, sondern am Suchen, wo man stehen
+# geblieben ist.
+#
+# Die vier Werte sagen jeder genau eine nachprüfbare Sache. Es gibt
+# bewusst *kein* zusammengesetztes "erledigt": Wann ein Trade
+# durchgearbeitet ist, weiss nur der Händler, und eine erfundene Definition
+# stünde am Ende als Fortschrittsbalken da, der etwas anderes misst, als er
+# behauptet.
+
+NACHARBEIT = {
+    #: Nichts daran geschrieben -- keine Notiz, kein Tag, kein Playbook.
+    #: Der frisch eingelaufene Trade, den noch niemand angesehen hat.
+    "unberuehrt",
+    #: Playbook zugeordnet, aber nicht jede abhakbare Regel beantwortet.
+    "regeln_offen",
+    "ohne_notiz",
+    "ohne_tag",
+    "ohne_playbook",
+}
+
+
+def _nacharbeit_filter(frage, art: str):
+    """Schränkt die Trade-Abfrage auf das ein, was noch aussteht."""
+    ohne_tag = ~select(db.TradeTag.trade_id).where(
+        db.TradeTag.trade_id == db.Trade.id
+    ).exists()
+    ohne_notiz = db.Trade.note.is_(None)
+    ohne_playbook = db.Trade.playbook_id.is_(None)
+
+    if art == "ohne_notiz":
+        return frage.where(ohne_notiz)
+    if art == "ohne_tag":
+        return frage.where(ohne_tag)
+    if art == "ohne_playbook":
+        return frage.where(ohne_playbook)
+    if art == "unberuehrt":
+        return frage.where(ohne_notiz, ohne_playbook, ohne_tag)
+
+    # regeln_offen: Playbook dran, aber weniger Antworten als abhakbare
+    # Regeln. Die Zählung läuft in der Datenbank, damit der Filter auch
+    # dann noch stimmt, wenn die Seite nur fünfzig Zeilen holt -- ein
+    # Filter, der erst nach dem Blättern greift, zählt falsch.
+    beantwortet = (
+        select(func.count())
+        .select_from(db.TradeRuleCheck)
+        .join(db.PlaybookRule, db.PlaybookRule.id == db.TradeRuleCheck.rule_id)
+        .where(
+            db.TradeRuleCheck.trade_id == db.Trade.id,
+            db.PlaybookRule.playbook_id == db.Trade.playbook_id,
+            db.PlaybookRule.checkable.is_(True),
+        )
+        .scalar_subquery()
+    )
+    abhakbar = (
+        select(func.count())
+        .select_from(db.PlaybookRule)
+        .where(
+            db.PlaybookRule.playbook_id == db.Trade.playbook_id,
+            db.PlaybookRule.checkable.is_(True),
+        )
+        .scalar_subquery()
+    )
+    # Ein Playbook ganz ohne abhakbare Regeln kann nichts offen haben --
+    # sonst stünde jeder Trade eines reinen Merksatz-Playbooks für immer
+    # auf der Nacharbeitsliste.
+    return frage.where(
+        db.Trade.playbook_id.is_not(None), abhakbar > 0, beantwortet < abhakbar
+    )
+
+
 @app.get("/api/trades")
 def liste(
     f: dict = Depends(filter_aus_query),
     limit: int = Query(200, le=1000),
     offset: int = Query(0, ge=0),
     outcome: str | None = Query(None, description="win | loss | scratch"),
+    nachbearbeitung: str | None = Query(
+        None, description=" | ".join(sorted(NACHARBEIT))
+    ),
     session: Session = Depends(hole_session),
 ):
+    if nachbearbeitung and nachbearbeitung not in NACHARBEIT:
+        raise HTTPException(
+            400,
+            f"Unbekannte Nachbearbeitung. Verfügbar: {', '.join(sorted(NACHARBEIT))}",
+        )
+
     frage = select(db.Trade)
     # Erst die Schranke, dann der Filter. Eine leere Liste heißt "keine
     # Konten" und muss nichts liefern -- nicht alles.
@@ -995,6 +1081,9 @@ def liste(
         frage = frage.where(db.Trade.net_pnl < 0)
     elif outcome == "scratch":
         frage = frage.where(db.Trade.net_pnl == 0)
+
+    if nachbearbeitung:
+        frage = _nacharbeit_filter(frage, nachbearbeitung)
 
     gesamt = session.scalar(
         select(func.count()).select_from(frage.subquery())

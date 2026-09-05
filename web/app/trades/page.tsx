@@ -9,7 +9,7 @@ import { useApp, useDaten } from '../../components/AppState';
 import { FilterBar, PageHead } from '../../components/Shell';
 import { TradeList } from '../../components/TradeList';
 import { EmptyState } from '../../components/primitives';
-import { api } from '../../lib/api';
+import { NACHARBEIT, api, type Nacharbeit } from '../../lib/api';
 import { geld, zahl } from '../../lib/format';
 import { outcome } from '../../lib/outcome';
 
@@ -23,16 +23,43 @@ const AUSGANG = [
 export default function TradesSeite() {
   const { filters, accountId, filterAktiv, resetFilters } = useApp();
   const [ausgang, setAusgang] = useState('');
+  const [nacharbeit, setNacharbeit] = useState<Nacharbeit | ''>('');
   const [offset, setOffset] = useState(0);
   const LIMIT = 50;
 
   const liste = useDaten(
-    () => api.trades({ ...filters, limit: LIMIT, offset, outcome: ausgang || undefined }),
-    [accountId, filters.von, filters.bis, filters.symbol, filters.direction, ausgang, offset],
+    () =>
+      api.trades({
+        ...filters,
+        limit: LIMIT,
+        offset,
+        outcome: ausgang || undefined,
+        nachbearbeitung: nacharbeit || undefined,
+      }),
+    [
+      accountId,
+      filters.von,
+      filters.bis,
+      filters.symbol,
+      filters.direction,
+      ausgang,
+      nacharbeit,
+      offset,
+    ],
   );
   const symbole = useDaten(() => api.symbols(accountId), [accountId]);
 
+  // Wie viele noch niemand angesehen hat. Eine eigene, sehr kleine
+  // Anfrage (`limit=1` — es zählt nur `total`), weil der Hinweis sonst
+  // erst erschiene, nachdem man den Filter gewählt hat. Genau umgekehrt
+  // soll er wirken: Er ist die Erinnerung, dass da noch was liegt.
+  const unberuehrt = useDaten(
+    () => api.trades({ account_id: accountId, limit: 1, nachbearbeitung: 'unberuehrt' }),
+    [accountId, nacharbeit],
+  );
+
   const summe = liste.daten?.trades.reduce((s, t) => s + t.net_pnl, 0) ?? 0;
+  const offeneAnzahl = unberuehrt.daten?.total ?? 0;
 
   return (
     <>
@@ -64,6 +91,22 @@ export default function TradesSeite() {
           </button>
         ))}
 
+        <select
+          aria-label="Nachbearbeitung"
+          value={nacharbeit}
+          onChange={(e) => {
+            setNacharbeit(e.target.value as Nacharbeit | '');
+            setOffset(0);
+          }}
+          style={{ marginLeft: 8 }}
+        >
+          {NACHARBEIT.map((n) => (
+            <option key={n.id} value={n.id}>
+              {n.label}
+            </option>
+          ))}
+        </select>
+
         {/* Ergebniszeile der gefilterten Auswahl */}
         {liste.daten && (
           <span
@@ -82,6 +125,33 @@ export default function TradesSeite() {
         )}
       </div>
 
+      {/* Der Hinweis steht auch dann da, wenn der Filter auf „alle" steht --
+          sonst fände ihn nur, wer ohnehin schon danach sucht. Er
+          verschwindet, sobald nichts mehr offen ist; eine dauerhafte Null
+          wäre eine Mahnung ohne Anlass. */}
+      {nacharbeit === '' && offeneAnzahl > 0 && (
+        <div style={{ marginTop: 10 }}>
+          <button
+            onClick={() => {
+              setNacharbeit('unberuehrt');
+              setOffset(0);
+            }}
+            style={{
+              fontSize: 11,
+              color: 'var(--td-neutral)',
+              borderLeft: '2px solid var(--td-line)',
+              paddingLeft: 10,
+              minHeight: 32,
+              textAlign: 'left',
+            }}
+          >
+            {zahl(offeneAnzahl)} {offeneAnzahl === 1 ? 'Trade' : 'Trades'} noch nicht
+            angesehen — weder Notiz noch Tag noch Playbook.{' '}
+            <span style={{ textDecoration: 'underline' }}>anzeigen</span>
+          </button>
+        </div>
+      )}
+
       <div style={{ marginTop: 12 }}>
         {liste.fehler ? (
           <EmptyState cause="sync" detail={liste.fehler} />
@@ -89,11 +159,16 @@ export default function TradesSeite() {
           <div style={{ color: 'var(--td-neutral)' }}>lädt …</div>
         ) : liste.daten.trades.length === 0 ? (
           <EmptyState
-            cause={filterAktiv || ausgang ? 'filter' : 'keine-daten'}
+            cause={filterAktiv || ausgang || nacharbeit ? 'filter' : 'keine-daten'}
             action={
-              (filterAktiv || ausgang) && (
+              (filterAktiv || ausgang || nacharbeit) && (
                 <button
-                  onClick={() => { resetFilters(); setAusgang(''); setOffset(0); }}
+                  onClick={() => {
+                    resetFilters();
+                    setAusgang('');
+                    setNacharbeit('');
+                    setOffset(0);
+                  }}
                   style={{
                     background: 'var(--td-accent)',
                     color: 'var(--td-on-accent)',
