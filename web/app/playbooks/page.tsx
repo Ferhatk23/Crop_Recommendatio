@@ -22,7 +22,12 @@ import { useState } from 'react';
 import { useDaten } from '../../components/AppState';
 import { PageHead } from '../../components/Shell';
 import { EmptyState } from '../../components/primitives';
-import { api, type Playbook, type RegelEingabe } from '../../lib/api';
+import {
+  api,
+  type Playbook,
+  type Pruefung,
+  type RegelEingabe,
+} from '../../lib/api';
 import { zahl } from '../../lib/format';
 
 /* ------------------------------------------------------------------ */
@@ -82,6 +87,7 @@ function RegelZeile({
   regel,
   erste,
   letzte,
+  pruefungen,
   onAendern,
   onVerschieben,
   onEntfernen,
@@ -89,10 +95,12 @@ function RegelZeile({
   regel: RegelEingabe;
   erste: boolean;
   letzte: boolean;
-  onAendern: (feld: keyof RegelEingabe, wert: string | boolean) => void;
+  pruefungen: Pruefung[];
+  onAendern: (feld: keyof RegelEingabe, wert: string | boolean | null) => void;
   onVerschieben: (richtung: -1 | 1) => void;
   onEntfernen: () => void;
 }) {
+  const pruefung = pruefungen.find((p) => p.key === regel.auto_check) ?? null;
   return (
     <div
       style={{
@@ -166,22 +174,57 @@ function RegelZeile({
               zählen in die Regeltreue. Ein Merksatz wie „ruhig bleiben"
               lässt sich am einzelnen Trade nicht mit ja oder nein
               beantworten — in einer Quote wäre er Füllmaterial. */}
-          <label
-            style={{
-              display: 'flex',
-              gap: 6,
-              alignItems: 'center',
-              fontSize: 11,
-              color: 'var(--td-neutral)',
-            }}
+          {!regel.auto_check && (
+            <label
+              style={{
+                display: 'flex',
+                gap: 6,
+                alignItems: 'center',
+                fontSize: 11,
+                color: 'var(--td-neutral)',
+              }}
+            >
+              <input
+                type="checkbox"
+                checked={regel.checkable}
+                onChange={(e) => onAendern('checkable', e.target.checked)}
+              />
+              am Trade abhakbar
+            </label>
+          )}
+
+          {/* Wo eine Prüfung greift, wird gemessen statt gefragt. Das ist
+              die verlässlichste Antwort, die diese App geben kann: Wer
+              sein Journal abends führt, erinnert sich an den Einstieg
+              anders, wenn er das Ergebnis schon kennt. */}
+          <select
+            aria-label="Prüfung"
+            value={regel.auto_check ?? ''}
+            onChange={(e) => onAendern('auto_check', e.target.value || null)}
+            style={{ ...feldStil, width: 'auto', fontSize: 11 }}
           >
+            <option value="">von Hand abhaken</option>
+            {pruefungen.map((p) => (
+              <option key={p.key} value={p.key}>
+                messen: {p.label}
+              </option>
+            ))}
+          </select>
+
+          {pruefung?.einheit && (
             <input
-              type="checkbox"
-              checked={regel.checkable}
-              onChange={(e) => onAendern('checkable', e.target.checked)}
+              value={regel.auto_param ?? ''}
+              onChange={(e) => onAendern('auto_param', e.target.value)}
+              aria-label={pruefung.einheit}
+              placeholder={pruefung.beispiel ?? ''}
+              style={{ ...feldStil, width: 90, fontSize: 11 }}
             />
-            am Trade abhakbar
-          </label>
+          )}
+          {pruefung?.einheit && (
+            <span style={{ fontSize: 11, color: 'var(--td-neutral)' }}>
+              {pruefung.einheit}
+            </span>
+          )}
           <button
             type="button"
             onClick={onEntfernen}
@@ -196,6 +239,21 @@ function RegelZeile({
             entfernen
           </button>
         </div>
+
+        {/* Warum eine Prüfung manchmal offen bleibt, gehört an die
+            Prüfung -- sonst sucht man den Grund in den Daten. */}
+        {pruefung && (
+          <p
+            style={{
+              fontSize: 10,
+              color: 'var(--td-neutral)',
+              margin: '2px 0 0',
+              lineHeight: 1.5,
+            }}
+          >
+            {pruefung.beschreibung}
+          </p>
+        )}
       </div>
     </div>
   );
@@ -207,10 +265,12 @@ function RegelZeile({
 
 function PlaybookFormular({
   buch,
+  pruefungen,
   onFertig,
   onAbbrechen,
 }: {
   buch?: Playbook;
+  pruefungen: Pruefung[];
   onFertig: () => void;
   onAbbrechen: () => void;
 }) {
@@ -223,6 +283,8 @@ function PlaybookFormular({
       group: r.group,
       text: r.text,
       checkable: r.checkable,
+      auto_check: r.auto_check,
+      auto_param: r.auto_param,
     })) ?? [{ group: 'Allgemein', text: '', checkable: true }],
   );
   const [laeuft, setLaeuft] = useState(false);
@@ -231,7 +293,11 @@ function PlaybookFormular({
   // wie viele Antworten daran hängen; hier steht nur die Zustimmung.
   const [rueckfrage, setRueckfrage] = useState<string | null>(null);
 
-  const setzeRegel = (i: number, feld: keyof RegelEingabe, wert: string | boolean) =>
+  const setzeRegel = (
+    i: number,
+    feld: keyof RegelEingabe,
+    wert: string | boolean | null,
+  ) =>
     setRegeln((alt) =>
       alt.map((r, j) => (i === j ? { ...r, [feld]: wert } : r)),
     );
@@ -325,6 +391,7 @@ function PlaybookFormular({
               regel={r}
               erste={i === 0}
               letzte={i === regeln.length - 1}
+              pruefungen={pruefungen}
               onAendern={(feld, wert) => setzeRegel(i, feld, wert)}
               onVerschieben={(richtung) => verschiebe(i, richtung)}
               onEntfernen={() =>
@@ -344,6 +411,8 @@ function PlaybookFormular({
                 group: alt.at(-1)?.group ?? 'Allgemein',
                 text: '',
                 checkable: true,
+                auto_check: null,
+                auto_param: null,
               },
             ])
           }
@@ -421,9 +490,11 @@ function PlaybookFormular({
 
 function PlaybookZeile({
   buch,
+  pruefungen,
   onGeaendert,
 }: {
   buch: Playbook;
+  pruefungen: Pruefung[];
   onGeaendert: () => void;
 }) {
   const [offen, setOffen] = useState(false);
@@ -502,8 +573,10 @@ function PlaybookZeile({
           {buch.rules.map((r) => (
             <li key={r.id}>
               {r.text}
-              {!r.checkable && (
-                <span style={{ opacity: 0.7 }}> · Merksatz</span>
+              {r.auto_check ? (
+                <span style={{ opacity: 0.7 }}> · gemessen</span>
+              ) : (
+                !r.checkable && <span style={{ opacity: 0.7 }}> · Merksatz</span>
               )}
             </li>
           ))}
@@ -516,6 +589,7 @@ function PlaybookZeile({
         <>
           <PlaybookFormular
             buch={buch}
+            pruefungen={pruefungen}
             onFertig={() => {
               setOffen(false);
               onGeaendert();
@@ -551,6 +625,7 @@ export default function PlaybookSeite() {
   const [runde, setRunde] = useState(0);
   const [neuOffen, setNeuOffen] = useState(false);
   const buecher = useDaten(() => api.playbooks(), [runde]);
+  const pruefungen = useDaten(() => api.pruefungen(), []);
 
   const aktualisieren = () => setRunde((r) => r + 1);
 
@@ -593,7 +668,12 @@ export default function PlaybookSeite() {
         ) : (
           <div>
             {liste.map((b) => (
-              <PlaybookZeile key={b.id} buch={b} onGeaendert={aktualisieren} />
+              <PlaybookZeile
+                key={b.id}
+                buch={b}
+                pruefungen={pruefungen.daten ?? []}
+                onGeaendert={aktualisieren}
+              />
             ))}
           </div>
         )}
@@ -602,6 +682,7 @@ export default function PlaybookSeite() {
           <div style={{ marginTop: 14 }}>
             <span className="td-label">Neues Playbook</span>
             <PlaybookFormular
+              pruefungen={pruefungen.daten ?? []}
               onFertig={() => {
                 setNeuOffen(false);
                 aktualisieren();

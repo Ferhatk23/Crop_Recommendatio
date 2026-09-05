@@ -89,9 +89,12 @@ function RegeltreueBlock({ minSample }: { minSample: number }) {
 
   return (
     <>
-      {/* Was die Zahl ist und was sie nicht ist. Beides gehört daneben:
-          Kein Häkchen kommt aus MT5, jedes aus dem Kopf -- die Quote misst
-          die eigene Selbsteinschätzung, nicht einen Befund. */}
+      {/* Was die Zahl ist und was sie nicht ist. Ein selbstgesetztes
+          Häkchen misst die eigene Selbsteinschätzung, eine gemessene
+          Regel einen Befund — und die beiden nebeneinander zu lesen,
+          ohne zu wissen welche welche ist, wäre irreführend. Deshalb
+          steht der Hinweis genau dann, wenn er gilt: Sobald jede Regel
+          gemessen wird, verschwindet die Einschränkung. */}
       <p
         style={{
           fontSize: 11,
@@ -103,8 +106,17 @@ function RegeltreueBlock({ minSample }: { minSample: number }) {
           maxWidth: 620,
         }}
       >
-        Selbstberichtet: Jedes Häkchen hast du selbst gesetzt, keins kommt aus
-        MT5.{' '}
+        {d.self_reported ? (
+          <>
+            Teils selbstberichtet: Häkchen, die du selbst gesetzt hast, stehen
+            neben {d.measured_rules > 0 ? 'gemessenen Regeln' : 'nichts Gemessenem'}.
+          </>
+        ) : (
+          <>
+            Vollständig gemessen: Jede Regel hier wird aus den Deals
+            beantwortet, keine aus dem Gedächtnis.
+          </>
+        )}{' '}
         {d.unanswered > 0 && (
           <>
             {zahl(d.unanswered)} von {zahl(d.total_trades)} Trades sind noch
@@ -172,6 +184,10 @@ function RegeltreueBlock({ minSample }: { minSample: number }) {
                         }}
                       >
                         {r.playbook} · {r.group}
+                        {/* Eine gemessene Quote wiegt schwerer als eine
+                            abgehakte. Wer beide nebeneinander liest, muss
+                            sehen können, welche welche ist. */}
+                        {r.auto_check ? ' · gemessen' : ' · abgehakt'}
                       </span>
                     </td>
                     <td style={{ padding: '7px 8px', textAlign: 'right' }}>

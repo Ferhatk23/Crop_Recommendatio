@@ -189,6 +189,23 @@ export interface PlaybookRegel {
   text: string;
   /** Abhakbar, also eine echte Vorbedingung — nicht bloß ein Merksatz. */
   checkable: boolean;
+  /**
+   * Schlüssel einer Prüfung aus `/api/pruefungen`, wenn die Regel gemessen
+   * statt abgehakt wird. Dann ist sie am Trade nicht setzbar.
+   */
+  auto_check: string | null;
+  /** Die Zahl dazu — „1" für ein Prozent, „240" für Minuten. */
+  auto_param: string | null;
+}
+
+/** Eine Regel, die sich aus den Deals beantworten lässt. */
+export interface Pruefung {
+  key: string;
+  label: string;
+  /** `null`, wenn die Prüfung ohne Zahl auskommt. */
+  einheit: string | null;
+  beschreibung: string;
+  beispiel: string | null;
 }
 
 /**
@@ -202,6 +219,8 @@ export interface RegelEingabe {
   group: string;
   text: string;
   checkable: boolean;
+  auto_check?: string | null;
+  auto_param?: string | null;
 }
 
 export interface Playbook {
@@ -222,6 +241,12 @@ export interface Playbook {
 export interface RegelAntwort {
   rule_id: number;
   checked: boolean;
+  /**
+   * Woher die Antwort kommt. `gemessen` schlägt `selbst` und ist nicht
+   * von Hand setzbar — wo eine Angabe im Deal steht, muss sie das
+   * Gedächtnis schlagen.
+   */
+  source?: 'selbst' | 'gemessen';
 }
 
 export interface Trade {
@@ -328,6 +353,8 @@ export interface RegelBilanz {
   playbook: string;
   group: string;
   text: string;
+  /** Gesetzt, wenn die Regel gemessen wird — sie wiegt dann schwerer. */
+  auto_check: string | null;
   answered: number;
   kept: number;
   broken: number;
@@ -351,8 +378,14 @@ export interface Regeltreue {
   total_trades: number;
   rules: RegelBilanz[];
   overlapping: boolean;
-  /** Immer wahr: Kein Häkchen kommt aus MT5, jedes aus dem Kopf. */
+  /**
+   * Wahr, solange irgendeine Regel von Hand beantwortet wird. Erst wenn
+   * jede abhakbare Regel eine Prüfung trägt, steht die Quote ganz auf
+   * Gemessenem — und erst dann darf der Hinweis weg.
+   */
   self_reported: boolean;
+  /** Wie viele der ausgewerteten Regeln gemessen werden. */
+  measured_rules: number;
 }
 
 /**
@@ -566,6 +599,8 @@ export const api = {
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(eintrag),
     }),
+
+  pruefungen: () => hole<Pruefung[]>('/api/pruefungen'),
 
   playbooks: (account_id?: number | null) =>
     hole<Playbook[]>(`/api/playbooks${query({ account_id })}`),

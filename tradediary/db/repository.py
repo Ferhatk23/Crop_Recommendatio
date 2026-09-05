@@ -325,6 +325,17 @@ def aufnehmen(
 # Abfragen
 # ---------------------------------------------------------------------------
 
+#: Was ein Aufrufer der Zeilen anfasst: Tags, das zugeordnete Playbook
+#: samt Regeln und die gesetzten Häkchen. Ohne das Vorladen stellt jeder
+#: Zugriff darauf eine eigene Abfrage; an 1.200 Trades gemessen kostete
+#: ein Report so 1.207 Abfragen statt elf.
+TRADE_VORLADEN = (
+    selectinload(db.Trade.tags).joinedload(db.TradeTag.tag),
+    selectinload(db.Trade.playbook).selectinload(db.Playbook.rules),
+    selectinload(db.Trade.rule_checks),
+)
+
+
 def zeilen_laden(
     session: Session,
     account_id: int | None = None,
@@ -353,10 +364,7 @@ def zeilen_laden(
     nachgefragt wurde. Es fällt bei fünfzig Trades nicht auf und wächst
     dann linear mit, bis der Report auf dem Telefon eine Sekunde steht.
     """
-    frage = select(db.Trade).options(
-        selectinload(db.Trade.tags).joinedload(db.TradeTag.tag),
-        selectinload(db.Trade.rule_checks).joinedload(db.TradeRuleCheck.rule),
-    )
+    frage = select(db.Trade).options(*TRADE_VORLADEN)
     if account_ids is not None:
         if not account_ids:
             return []

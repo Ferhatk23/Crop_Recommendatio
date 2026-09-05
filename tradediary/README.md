@@ -31,6 +31,7 @@ tradediary/
 │   ├── metrics.py     # Trades → Kennzahlen
 │   ├── score.py       # Teilwerte → Gesamtwert 0–100
 │   ├── rules.py       # Prop-Grenzen: Tagesverlust, Max-DD, Konsistenz
+│   ├── regelpruefung.py # Playbook-Regeln, die sich aus den Deals ergeben
 │   └── instruments.py # Preisstellen und riskierter Betrag je Symbol
 ├── sources/
 │   └── csv_source.py  # Broker-CSV mit einstellbarer Spaltenzuordnung
@@ -186,11 +187,52 @@ Ein Playbook ist die schriftliche Fassung dessen, was man zu handeln
 behauptet: ein Name, eine Beschreibung und eine geordnete Regelliste. Die
 Reihenfolge ist der Ablauf und wird deshalb nirgends sortiert.
 
-Regeln sind entweder **abhakbar** oder ein **Merksatz**. Der Unterschied
-ist nicht kosmetisch: Nur abhakbare bekommen am Trade ein Kästchen und
-zählen in die Quote. „Nicht in die Nachricht hineintraden" ist richtig und
-wichtig, lässt sich am einzelnen Trade aber nicht mit ja oder nein
-beantworten — in einer Quote wäre es Füllmaterial.
+Regeln sind **gemessen**, **abhakbar** oder ein **Merksatz**. Der
+Unterschied ist nicht kosmetisch: Nur die ersten beiden zählen in die
+Quote. „Nicht in die Nachricht hineintraden" ist richtig und wichtig,
+lässt sich am einzelnen Trade aber nicht mit ja oder nein beantworten —
+in einer Quote wäre es Füllmaterial.
+
+### Gemessen statt gefragt
+
+Eine Quote aus lauter selbstgesetzten Häkchen misst die eigene
+Selbsteinschätzung. Man benotet sich selbst, und zwar rückblickend, wenn
+das Ergebnis schon bekannt ist: Nach einem Gewinn erinnert man sich anders
+an den Einstieg als nach einem Verlust.
+
+Ein Teil der üblichen Regeln braucht diese Erinnerung nicht. Fünf davon
+beantwortet `core/regelpruefung.py` aus den Deals:
+
+| Prüfung | woraus |
+|---|---|
+| `stop_gesetzt` | `initial_sl` |
+| `risiko_hoechstens` (%) | `risk_amount` gegen das Startkapital |
+| `haltedauer_hoechstens` (min) | Eröffnung bis Schliessung |
+| `volumen_hoechstens` (Lot) | Positionsvolumen |
+| `nur_ein_einstieg` | Zahl der Einstiegs-Deals |
+
+**Gemessen schlägt abgehakt.** Ein Häkchen an einer Regel, die inzwischen
+eine Prüfung trägt, fällt heraus; von Hand setzen lässt sie sich gar nicht
+erst (400). Das ist der ganze Zweck — sonst hätte man die Prüfung auch
+weglassen können. Gelöscht wird das alte Häkchen aber nicht: Nimmt man die
+Prüfung wieder weg, steht es wieder da.
+
+**Drei Antworten, nicht zwei.** Fehlt eine Angabe, ist das kein Regelbruch,
+sondern eine offene Frage. Ohne Stop gibt es kein Risiko zu vergleichen,
+ohne Startkapital keinen Prozentbezug; beides ergibt `None` und damit eine
+fehlende Zeile. Ein `False` aus Unwissen wäre die schlimmste Ausgabe dieses
+Programms: Es sähe aus wie ein Befund über den Händler und wäre eine
+Aussage über eine leere Spalte.
+
+**Bruchstücke bekommen eine Halbregel.** Lag die Eröffnung vor dem
+abgefragten Zeitraum, sind Haltedauer, Volumen und Zahl der Einstiege
+*zu klein* gemessen. Reisst schon dieser Ausschnitt die Grenze, steht der
+Bruch fest — das ist ein Befund. Liegt er darunter, folgt daraus nichts,
+und die Regel bleibt offen. Ein „eingehalten" wäre hier ein Freispruch aus
+Nichtwissen. (Diese Asymmetrie war beim ersten Anlauf nicht drin und ist
+beim Nachlesen des eigenen Codes aufgefallen: Ein Bruchstück mit dreissig
+gemessenen Minuten galt unter einer Grenze von sechzig als eingehalten,
+obwohl der ungesehene Teil Stunden gedauert haben kann.)
 
 ### Drei Zustände, nicht zwei
 
@@ -222,10 +264,11 @@ Je Regel kommt zusätzlich, was ihr Bruch gekostet hat (`pnl_kept` gegen
 `pnl_broken`). Das ist der eigentliche Zweck: Eine Regel, deren Bruch
 nichts kostet, ist keine Regel, sondern eine Angewohnheit.
 
-Die Antwort trägt `self_reported: true`, und die Oberfläche schreibt es
-hin. **Nichts davon wird aus MT5 abgeleitet.** Ein Teil dieser Regeln wäre
-es (»Stop gesetzt« steht in `initial_sl`), aber abgeleitet wird noch
-nichts — die Quote misst, was der Händler über sich notiert hat.
+`self_reported` ist wahr, solange **irgendeine** Regel von Hand
+beantwortet wird, und `measured_rules` sagt, wie viele gemessen werden.
+Erst wenn jede abhakbare Regel eine Prüfung trägt, verschwindet der
+Hinweis — eine Einschränkung stehenzulassen, wenn sie nicht mehr gilt, ist
+genauso unehrlich wie sie wegzulassen, wenn sie gilt.
 
 ### Wiederfinden, was noch aussteht
 
@@ -616,12 +659,11 @@ Damit der Stand nicht besser klingt, als er ist:
   ob das echte Terminal dieselben Felder unter denselben Namen liefert und
   ob die Annahme über die Zeitzone am Server von Alpha Capital stimmt, lässt
   sich nur dort prüfen. Der erste Lauf gehört gegen ein Demo-Konto.
-- **Regeln, die sich selbst prüfen.** Jedes Häkchen ist heute
-  selbstberichtet. Ein Teil der Regeln wäre aus den Deals ableitbar
-  (»Stop gesetzt« steht in `initial_sl`, »höchstens 1 % Risiko« in
-  `risk_amount`), aber abgeleitet wird noch nichts. Die Regeltreue misst
-  die eigene Selbsteinschätzung — nützlich, solange man weiß, dass es das
-  ist, und die Antwort sagt es mit `self_reported`.
+- **Regeln, die den Kontext brauchen.** Fünf Prüfungen beantworten sich
+  aus den Deals, aber „nur in der ersten Handelsstunde" oder „nicht gegen
+  den Trend" nicht: Für die erste fehlt die Handelszeitzone des Kontos,
+  für die zweite ein Trendmass. Solche Regeln bleiben abhakbar, und die
+  Quote bleibt an dieser Stelle selbstberichtet.
 - **Spaltenzuordnung für den CSV-Import** lässt sich nur über die API
   mitgeben, nicht in der Oberfläche einstellen. Die Erkennung trifft die
   gängigen Broker-Exporte von selbst; bei einem exotischen Format braucht es
@@ -643,5 +685,8 @@ Damit der Stand nicht besser klingt, als er ist:
    diese Tabelle nachgemessen — sie ist nach dem nächsten Start da, mit
    allen drei Spalten. Was `create_all` *nicht* kann, ist eine geänderte
    Spalte. Spätestens dafür braucht es Alembic.
-3. **Regeln aus den Deals ableiten**, damit ein Teil der Häkchen nicht mehr
-   vom Gedächtnis abhängt.
+3. **Weitere Prüfungen**, sobald sich im Betrieb zeigt, welche Regeln man
+   wirklich jeden Abend abhakt. Die Registry in `core/regelpruefung.py`
+   nimmt eine neue in wenigen Zeilen auf; die Oberfläche baut ihre
+   Auswahlliste aus `/api/pruefungen` und muss dafür nicht angefasst
+   werden.

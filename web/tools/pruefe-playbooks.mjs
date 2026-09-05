@@ -51,11 +51,14 @@ const ctx = await browser.newContext({
 });
 const page = await ctx.newPage();
 page.on('pageerror', (e) => fehler.push(`Ausnahme: ${e.message}`));
-// 401 gehört zum Ablauf: Die Seite fragt vor der Anmeldung, wer da ist,
-// und die Antwort "niemand" ist der Grund für das Anmeldeformular.
-// 409 ebenfalls: Die Rückfrage beim Streichen beantworteter Regeln wird
-// weiter unten absichtlich ausgelöst.
-const ERWARTET = /status of (401|409)/;
+// Drei Statuscodes gehören zum Ablauf und sind keine Defekte:
+//   401 -- die Seite fragt vor der Anmeldung, wer da ist. Die Antwort
+//          "niemand" ist der Grund für das Anmeldeformular.
+//   409 -- die Rückfrage beim Streichen beantworteter Regeln.
+//   400 -- die Zahlenregel, die weiter unten absichtlich ohne Zahl
+//          abgeschickt wird. Würde sie *nicht* abgelehnt, wäre das der
+//          Fehler.
+const ERWARTET = /status of (400|401|409)/;
 page.on('console', (m) => {
   if (m.type() === 'error' && !ERWARTET.test(m.text())) {
     fehler.push(`Konsole: ${m.text()}`);
@@ -248,6 +251,82 @@ pruefe(
 
 /* ------------------------------------------------------------------ */
 
+console.log('\nEine gemessene Regel antwortet von selbst');
+
+// Der Kern der Sache: Wo eine Angabe im Deal steht, schlägt sie das
+// Gedächtnis. Wer sein Journal abends führt, erinnert sich an den
+// Einstieg anders, wenn er das Ergebnis schon kennt.
+await page.goto(BASIS + '/playbooks', { waitUntil: 'networkidle' });
+await page.waitForTimeout(1600);
+const zeileM = page.locator('div').filter({ hasText: name });
+await zeileM.locator('button', { hasText: 'bearbeiten' }).last().click();
+await page.waitForTimeout(700);
+
+// `exact` ist nötig: Ein umschliessendes <label> zählt den Feldinhalt zu
+// seinem Text, und die Beschreibung „Nur zur Prüfung." trifft sonst mit.
+// Die *zweite* Regel bekommt die Prüfung, nicht die erste. Die erste
+// bleibt von Hand gepflegt -- nur so lässt sich zeigen, dass beide
+// Sorten nebeneinander funktionieren. Beim ersten Anlauf lag die
+// Messung auf der ersten Regel, und die Prüfung "bleibt anklickbar"
+// schlug zu Recht an: Sie war es nicht mehr.
+const pruefwahl = page.getByLabel('Prüfung', { exact: true }).nth(1);
+pruefe((await pruefwahl.count()) > 0, 'die Prüfungs-Auswahl steht an der Regel');
+await pruefwahl.selectOption('haltedauer_hoechstens');
+await page.waitForTimeout(400);
+
+const zahlfeld = page.getByLabel('Minuten', { exact: true }).first();
+pruefe(
+  (await zahlfeld.count()) > 0,
+  'eine Zahlenregel bekommt ein Feld mit ihrer Einheit',
+);
+
+// Ohne Zahl muss der Server ablehnen -- sonst bliebe die Regel bei jedem
+// Trade offen, und das sähe aus wie ein Fehler in den Daten.
+await page.getByRole('button', { name: 'Speichern' }).first().click();
+await page.waitForTimeout(1600);
+const meldungen = (await page.getByRole('alert').allInnerTexts())
+  .map((t) => t.trim())
+  .filter(Boolean);
+pruefe(
+  meldungen.some((t) => /Zahl/.test(t)),
+  `eine Zahlenregel ohne Zahl wird abgelehnt (${meldungen[0] ?? 'keine Meldung'})`,
+);
+
+await zahlfeld.fill('600');
+await page.getByRole('button', { name: 'Speichern' }).first().click();
+await page.waitForTimeout(2000);
+pruefe(
+  (await page.getByText(/· gemessen/).count()) > 0,
+  'die Regel ist danach als gemessen gekennzeichnet',
+);
+
+await page.goto(tradeUrl, { waitUntil: 'networkidle' });
+await page.waitForTimeout(2000);
+pruefe(
+  (await page.getByText(/gemessen · (eingehalten|gebrochen)/).count()) > 0,
+  'am Trade steht der Befund, ohne dass jemand geklickt hätte',
+);
+pruefe(
+  (await page
+    .getByRole('button', { name: /Asien-Range sauber markiert: eingehalten/ })
+    .count()) > 0,
+  'die von Hand gepflegte Regel bleibt daneben anklickbar',
+);
+
+// Die gemessene darf gar kein Kästchen anbieten -- ein Klick, der nichts
+// ändert, ist schlimmer als ein fehlender.
+const messText = await page
+  .locator('div')
+  .filter({ hasText: /gemessen · (eingehalten|gebrochen)/ })
+  .last()
+  .innerText();
+pruefe(
+  !/^\s*$/.test(messText),
+  `der Befund steht im Klartext daneben (${messText.split('\n').slice(0, 2).join(' · ')})`,
+);
+
+/* ------------------------------------------------------------------ */
+
 console.log('\nDie Häkchen kommen in der Auswertung an');
 
 await page.goto(BASIS + '/reports', { waitUntil: 'networkidle' });
@@ -256,8 +335,12 @@ await page.getByRole('button', { name: 'Regeltreue' }).click();
 await page.waitForTimeout(2000);
 
 pruefe(
-  (await page.getByText(/Selbstberichtet/).count()) > 0,
-  'die Auswertung sagt, dass sie selbstberichtet ist',
+  (await page.getByText(/selbstberichtet|gemessen/i).count()) > 0,
+  'die Auswertung sagt, woher ihre Antworten kommen',
+);
+pruefe(
+  (await page.getByText(/· gemessen/).count()) > 0,
+  'gemessene Regeln sind in der Tabelle als solche erkennbar',
 );
 pruefe(
   (await page.getByText(/eingehalten/).count()) > 0 &&

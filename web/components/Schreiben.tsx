@@ -623,6 +623,10 @@ export function PlaybookFeld({
   const buch = playbooks.find((p) => p.id === playbookId) ?? null;
   const offen = zustand === 'geaendert' || zustand === 'fehler';
 
+  const gemessene = new Set(
+    (buch?.rules ?? []).filter((r) => r.auto_check).map((r) => r.id),
+  );
+
   const setze = (rule_id: number, wert: boolean | null) => {
     setAktuell((alt) => {
       const neu = new Map(alt);
@@ -634,10 +638,13 @@ export function PlaybookFeld({
   };
 
   const speichern = async () => {
-    const gesendet = [...aktuell.entries()].map(([rule_id, checked]) => ({
-      rule_id,
-      checked,
-    }));
+    // Gemessene Regeln bleiben draussen: Der Server lehnt sie ab, und zu
+    // Recht -- sie sind keine Meinung. Sie stehen ohnehin nie in
+    // `aktuell`, aber ein Playbook kann zwischen zwei Ansichten eine
+    // Prüfung dazubekommen haben, und dann läge dort noch ein Altwert.
+    const gesendet = [...aktuell.entries()]
+      .filter(([rule_id]) => !gemessene.has(rule_id))
+      .map(([rule_id, checked]) => ({ rule_id, checked }));
     setZustand('speichert');
     setFehler(null);
     try {
@@ -667,6 +674,10 @@ export function PlaybookFeld({
   };
 
   const abhakbar = buch ? buch.rules.filter((r) => r.checkable) : [];
+  // `aktuell` enthält die gemessenen Antworten bereits -- sie kommen mit
+  // `rule_checks` vom Server. Eine gemessene Regel, die sich in diesen
+  // Daten *nicht* beantworten lässt, fehlt dort und gilt damit richtig
+  // als offen.
   const beantwortet = abhakbar.filter((r) => aktuell.has(r.id)).length;
 
   return (
@@ -759,7 +770,64 @@ export function PlaybookFeld({
                       {r.group}
                     </div>
                   )}
-                  {r.checkable ? (
+                  {r.auto_check ? (
+                    /* Gemessen statt abgehakt: Die Antwort steht in den
+                       Deals. Sie anklickbar zu machen wäre eine
+                       Einladung zu einem Klick, der nichts ändert. */
+                    <div
+                      style={{
+                        display: 'flex',
+                        gap: 8,
+                        alignItems: 'center',
+                        padding: '5px 0',
+                        borderTop: '1px solid var(--td-line)',
+                      }}
+                    >
+                      <span
+                        aria-hidden
+                        style={{
+                          minWidth: 34,
+                          minHeight: 30,
+                          display: 'flex',
+                          alignItems: 'center',
+                          justifyContent: 'center',
+                          border: '1px solid var(--td-line)',
+                          background:
+                            wert === undefined ? 'transparent' : 'var(--td-surface)',
+                          color: 'var(--td-neutral)',
+                          fontSize: 13,
+                        }}
+                      >
+                        {wert === undefined ? '·' : wert ? '✓' : '✗'}
+                      </span>
+                      <span style={{ fontSize: 12, lineHeight: 1.45 }}>
+                        {r.text}
+                        <span
+                          style={{
+                            display: 'block',
+                            fontSize: 10,
+                            color: 'var(--td-neutral)',
+                          }}
+                        >
+                          {wert === undefined
+                            ? 'gemessen · in diesen Daten nicht zu beantworten'
+                            : wert
+                              ? 'gemessen · eingehalten'
+                              : 'gemessen · gebrochen'}
+                        </span>
+                      </span>
+                      {/* Für Bildschirmleser dasselbe in einem Satz. */}
+                      <span className="td-sr">
+                        {r.text}:{' '}
+                        {wert === undefined
+                          ? 'nicht zu beantworten'
+                          : wert
+                            ? 'eingehalten'
+                            : 'gebrochen'}
+                        , gemessen
+                      </span>
+                    </div>
+                  ) : r.checkable ? (
                     <div
                       role="group"
                       aria-label={r.text}

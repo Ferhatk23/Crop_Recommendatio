@@ -282,6 +282,7 @@ class Trade(Base):
     note: Mapped[str | None] = mapped_column(Text, default=None)
 
     account: Mapped["Account"] = relationship(back_populates="trades")
+    playbook: Mapped["Playbook | None"] = relationship()
     tags: Mapped[list["TradeTag"]] = relationship(
         back_populates="trade", cascade="all, delete-orphan"
     )
@@ -350,6 +351,15 @@ class PlaybookRule(Base):
     text: Mapped[str] = mapped_column(Text)
     checkable: Mapped[bool] = mapped_column(Boolean, default=False)
     sort_order: Mapped[int] = mapped_column(Integer, default=0)
+
+    #: Schlüssel aus :mod:`core.regelpruefung`, wenn sich die Regel aus den
+    #: Daten beantworten lässt. Dann wird gemessen statt gefragt, und die
+    #: Antwort ist kein Häkchen mehr, sondern ein Befund.
+    auto_check: Mapped[str | None] = mapped_column(String(40), default=None)
+    #: Die Zahl dazu, als Text -- „1" für ein Prozent, „240" für Minuten.
+    #: Als Text, weil die Einheit je Prüfung eine andere ist und eine
+    #: gemeinsame Spalte sonst so tun müsste, als wäre sie vergleichbar.
+    auto_param: Mapped[str | None] = mapped_column(String(40), default=None)
 
     playbook: Mapped["Playbook"] = relationship(back_populates="rules")
     checks: Mapped[list["TradeRuleCheck"]] = relationship(

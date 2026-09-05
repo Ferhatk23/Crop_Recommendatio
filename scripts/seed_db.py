@@ -93,17 +93,22 @@ def main() -> None:
                         description="Ausbruch aus der asiatischen Range.")
         s.add(pb)
         s.flush()
+        # Die letzten drei tragen eine Pruefung: Sie werden aus den Deals
+        # beantwortet statt abgehakt. Ohne mindestens eine im Seed
+        # entwickelt man den gemessenen Fall an einem Bildschirm, auf dem
+        # er nie vorkommt.
         regeln = [
-            ("Aufbau", "Asiatische Range sauber abgegrenzt", False),
-            ("Aufbau", "Ueber VWAP", True),
-            ("Einstieg", "Ausbruch mit Volumen bestaetigt", False),
-            ("Risiko", "Stop hinter der Range", True),
-            ("Risiko", "Hoechstens 1 % Risiko", True),
-            ("Verhalten", "Nicht nachgekauft", True),
+            ("Aufbau", "Asiatische Range sauber abgegrenzt", False, None, None),
+            ("Aufbau", "Ueber VWAP", True, None, None),
+            ("Einstieg", "Ausbruch mit Volumen bestaetigt", False, None, None),
+            ("Risiko", "Stop hinter der Range", True, "stop_gesetzt", None),
+            ("Risiko", "Hoechstens 1 % Risiko", True, "risiko_hoechstens", "1"),
+            ("Verhalten", "Nicht nachgekauft", True, "nur_ein_einstieg", None),
         ]
-        for i, (gruppe, text, pruefbar) in enumerate(regeln):
+        for i, (gruppe, text, pruefbar, pruefung, wert) in enumerate(regeln):
             s.add(m.PlaybookRule(playbook_id=pb.id, group_label=gruppe,
-                                 text=text, checkable=pruefbar, sort_order=i))
+                                 text=text, checkable=pruefbar, sort_order=i,
+                                 auto_check=pruefung, auto_param=wert))
         s.commit()
 
         verteile_beschriftungen(s, marken, pb, setups, fehler, emotionen)
@@ -178,7 +183,9 @@ def verteile_beschriftungen(s, marken, pb, setups, fehler, emotionen) -> None:
     verknuepft = 0
     notizen = 0
     haken = 0
-    pruefbare = [r for r in pb.rules if r.checkable]
+    # Von Hand abgehakt wird nur, was keine Pruefung traegt -- die
+    # anderen lehnt die API zu Recht ab.
+    pruefbare = [r for r in pb.rules if r.checkable and not r.auto_check]
 
     notiztexte = [
         "Plan war sauber, Ausfuehrung auch. Nichts zu aendern.",

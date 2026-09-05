@@ -27,11 +27,18 @@ from sqlalchemy import delete, func, select
 from sqlalchemy.orm import Session, joinedload, selectinload
 
 from .. import sicherheit
-from ..core import instruments, metrics as kern_metrics, rules, score as kern_score
+from ..core import (
+    instruments,
+    metrics as kern_metrics,
+    regelpruefung,
+    rules,
+    score as kern_score,
+)
 from ..core.metrics import daily_pnl
 from ..core.models import Outcome
 from ..db import models as db
 from ..db.repository import (
+    TRADE_VORLADEN,
     engine_bauen,
     kennzahlen,
     schema_anlegen,
@@ -909,8 +916,124 @@ def overview(
 # ---------------------------------------------------------------------------
 # Trades
 # ---------------------------------------------------------------------------
+#
+# Regel-Antworten kommen aus zwei Quellen, und die Antwort sagt welche:
+#
+# * `selbst`   -- ein Häkchen, das der Händler gesetzt hat.
+# * `gemessen` -- aus den Deals abgeleitet. Sie überschreibt ein Häkchen
+#                 an derselben Regel und ist gar nicht erst setzbar.
+#
+# Die Vorfahrt ist der ganze Punkt. Wer sein Journal abends führt,
+# erinnert sich an den Einstieg anders, wenn er das Ergebnis schon kennt.
+# Wo eine Angabe im Deal steht, muss sie das Gedächtnis schlagen -- sonst
+# hätte man die Prüfung auch weglassen können.
 
-def trade_block(zeile: db.Trade) -> dict:
+
+def regel_kontext(session: Session, zeilen) -> dict[int, dict]:
+    """Was die messbaren Regeln über den Trade hinaus brauchen.
+
+    Zwei Abfragen für die ganze Liste, nicht zwei je Zeile: Startkapital
+    je Konto und Zahl der Einstiege je Position. Ohne das Bündeln wäre
+    die Prüfung teurer als alles, was sie beantwortet.
+    """
+    zeilen = list(zeilen)
+    if not zeilen:
+        return {}
+
+    konto_ids = {z.account_id for z in zeilen}
+    kapital = {
+        a_id: betrag
+        for a_id, betrag in session.execute(
+            select(db.Account.id, db.Account.starting_balance).where(
+                db.Account.id.in_(konto_ids)
+            )
+        ).all()
+    }
+
+    # Nur zählen, was gebraucht wird: Positionen, an denen eine Regel mit
+    # `nur_ein_einstieg` hängt, sind die Ausnahme -- aber die Abfrage ist
+    # eine einzige, also lohnt die Unterscheidung nicht.
+    paare = {(z.account_id, z.position_id) for z in zeilen}
+    einstiege: dict[tuple[int, int], int] = {}
+    if paare:
+        for a_id, p_id, anzahl in session.execute(
+            select(db.Deal.account_id, db.Deal.position_id, func.count())
+            .where(
+                db.Deal.account_id.in_(konto_ids),
+                db.Deal.position_id.in_({p for _, p in paare}),
+                db.Deal.entry == "in",
+            )
+            .group_by(db.Deal.account_id, db.Deal.position_id)
+        ).all():
+            einstiege[(a_id, p_id)] = anzahl
+
+    return {
+        z.id: {
+            "startkapital": (
+                Decimal(str(kapital[z.account_id]))
+                if kapital.get(z.account_id) is not None
+                else None
+            ),
+            # `None` heisst "nicht gezählt" und lässt die Regel offen.
+            # Eine 0 stünde für "kein Einstieg gesehen" und wäre bei einem
+            # Trade, den es gibt, offensichtlich falsch.
+            "einstiege": einstiege.get((z.account_id, z.position_id)),
+        }
+        for z in zeilen
+    }
+
+
+def regel_antworten(zeile: db.Trade, kern, kontext: dict | None) -> list[dict]:
+    """Die Antworten zum zugeordneten Playbook.
+
+    Das Playbook ist die Autorität, nicht die gespeicherten Häkchen: Wer
+    ein Playbook wechselt, dessen alte Antworten bleiben in der Datenbank
+    stehen, tauchen hier aber nicht auf -- sie beantworten Regeln, die für
+    diesen Trade nicht mehr gelten. Zurückgewechselt sind sie wieder da.
+
+    Aus demselben Grund fällt ein Häkchen an einer Regel heraus, an der
+    inzwischen eine Prüfung hängt. Es stammt dann aus der Zeit davor, und
+    was gemessen wird, schlägt das Gedächtnis.
+    """
+    if zeile.playbook_id is None or zeile.playbook is None:
+        return []
+
+    kontext = kontext or {}
+    regeln = {r.id: r for r in zeile.playbook.rules}
+    heraus: dict[int, dict] = {}
+
+    for c in zeile.rule_checks:
+        regel = regeln.get(c.rule_id)
+        if regel is not None and not regel.auto_check:
+            heraus[c.rule_id] = {
+                "rule_id": c.rule_id,
+                "checked": c.checked,
+                "source": "selbst",
+            }
+
+    for regel in regeln.values():
+        if not regel.auto_check:
+            continue
+        antwort = regelpruefung.pruefe(
+            regel.auto_check,
+            regel.auto_param,
+            kern,
+            startkapital=kontext.get("startkapital"),
+            einstiege=kontext.get("einstiege"),
+        )
+        # `None` heisst "hier nicht zu beantworten" und bleibt eine
+        # fehlende Zeile -- genau wie ein nicht gesetztes Häkchen.
+        if antwort is not None:
+            heraus[regel.id] = {
+                "rule_id": regel.id,
+                "checked": antwort,
+                "source": "gemessen",
+            }
+
+    return sorted(heraus.values(), key=lambda a: a["rule_id"])
+
+
+def trade_block(zeile: db.Trade, kontext: dict | None = None) -> dict:
     kern = trade_zu_kern(zeile)
     return {
         "id": zeile.id,
@@ -949,19 +1072,7 @@ def trade_block(zeile: db.Trade) -> dict:
              "kind": tt.tag.kind.value if hasattr(tt.tag.kind, "value") else tt.tag.kind}
             for tt in zeile.tags
         ],
-        # Nur die Antworten zum *zugeordneten* Playbook. Wer ein Playbook
-        # wechselt, dessen alte Antworten bleiben stehen, zählen aber
-        # nirgends mit -- sie beantworten Regeln, die für diesen Trade
-        # nicht mehr gelten. Zurückgewechselt sind sie wieder da.
-        "rule_checks": (
-            [
-                {"rule_id": c.rule_id, "checked": c.checked}
-                for c in zeile.rule_checks
-                if c.rule.playbook_id == zeile.playbook_id
-            ]
-            if zeile.playbook_id is not None
-            else []
-        ),
+        "rule_checks": regel_antworten(zeile, kern, kontext),
     }
 
 
@@ -1097,17 +1208,15 @@ def liste(
         # Tags, und von jeder Regel-Antwort, zu welchem Playbook sie
         # gehört. An 1.200 Trades nachgemessen -- eine Seite kostete 209
         # Abfragen statt der drei, die es braucht.
-        .options(
-            selectinload(db.Trade.tags).joinedload(db.TradeTag.tag),
-            selectinload(db.Trade.rule_checks).joinedload(db.TradeRuleCheck.rule),
-        )
+        .options(*TRADE_VORLADEN)
     ).all()
 
+    kontext = regel_kontext(session, zeilen)
     return {
         "total": gesamt,
         "limit": limit,
         "offset": offset,
-        "trades": [trade_block(t) for t in zeilen],
+        "trades": [trade_block(t, kontext.get(t.id)) for t in zeilen],
     }
 
 
@@ -1128,7 +1237,7 @@ def detail(
         .order_by(db.Deal.time_utc)
     ).all()
 
-    daten = trade_block(zeile)
+    daten = trade_block(zeile, regel_kontext(session, [zeile]).get(zeile.id))
     daten["executions"] = [
         {
             "ticket": d.ticket,
@@ -1364,15 +1473,21 @@ def regeltreue(
     # Je Regel: beantwortet, gehalten -- und was der Bruch gekostet hat.
     je_regel: dict[int, dict] = {}
 
+    kontexte = regel_kontext(session, [z for z, _ in paare])
+
     for zeile, kern in paare:
         buch = buecher.get(zeile.playbook_id)
         if buch is None:
             continue
         pruefbar = {r.id for r in buch.rules if r.checkable}
+        # Über dieselbe Funktion wie die Trade-Ansicht: Gemessene Regeln
+        # zählen hier genauso mit und schlagen ein altes Häkchen. Zwei
+        # getrennte Wege zu derselben Frage würden über kurz oder lang
+        # zwei verschiedene Antworten geben.
         antworten = {
-            c.rule_id: c.checked
-            for c in zeile.rule_checks
-            if c.rule_id in pruefbar
+            a["rule_id"]: a["checked"]
+            for a in regel_antworten(zeile, kern, kontexte.get(zeile.id))
+            if a["rule_id"] in pruefbar
         }
 
         for rule_id, gehalten in antworten.items():
@@ -1422,6 +1537,9 @@ def regeltreue(
                     "playbook": buch.name,
                     "group": regel.group_label,
                     "text": regel.text,
+                    # Gemessene Regeln tragen mehr Gewicht als abgehakte,
+                    # und die Oberflaeche muss das sagen koennen.
+                    "auto_check": regel.auto_check,
                     "answered": beantwortet,
                     "kept": len(gehalten),
                     "broken": len(verletzt),
@@ -1449,7 +1567,11 @@ def regeltreue(
         "rules": regeln,
         # Kein Trade zählt in zwei Gruppen -- anders als bei den Tags.
         "overlapping": False,
-        "self_reported": True,
+        # Wahr, solange irgendeine Regel von Hand beantwortet wird. Nur
+        # wenn jede abhakbare Regel eine Prüfung trägt, steht die Quote
+        # ganz auf Gemessenem -- und erst dann darf der Hinweis weg.
+        "self_reported": any(r["auto_check"] is None for r in regeln),
+        "measured_rules": sum(1 for r in regeln if r["auto_check"]),
     }
 
 
@@ -1676,7 +1798,7 @@ def trade_aendern(
 
     session.commit()
     session.refresh(zeile)
-    return trade_block(zeile)
+    return trade_block(zeile, regel_kontext(session, [zeile]).get(zeile.id))
 
 
 class TagEingabe(BaseModel):
@@ -1748,7 +1870,7 @@ def trade_tags_setzen(
 
     session.commit()
     session.refresh(zeile)
-    return trade_block(zeile)
+    return trade_block(zeile, regel_kontext(session, [zeile]).get(zeile.id))
 
 
 @app.get("/api/tags")
@@ -1920,6 +2042,8 @@ def regel_block(r: db.PlaybookRule) -> dict:
         "group": r.group_label,
         "text": r.text,
         "checkable": r.checkable,
+        "auto_check": r.auto_check,
+        "auto_param": r.auto_param,
     }
 
 
@@ -1959,12 +2083,17 @@ class RegelEingabe(BaseModel):
 
     `id` ist da, wenn die Regel schon existiert -- dann wird sie geändert
     statt neu angelegt, und ihre Antworten bleiben ihr erhalten.
+
+    `auto_check` macht aus der Regel eine gemessene: Die Antwort kommt
+    dann aus den Deals und ist am Trade nicht mehr setzbar.
     """
 
     id: int | None = None
     group: str = "Allgemein"
     text: str
     checkable: bool = True
+    auto_check: str | None = None
+    auto_param: str | None = None
 
 
 class PlaybookEingabe(BaseModel):
@@ -1989,6 +2118,23 @@ def _pruefe_regeln(regeln: list[RegelEingabe]) -> None:
         if len(r.group) > 120:
             raise HTTPException(400, f"Gruppenname zu lang: {r.group[:40]}…")
 
+        if not r.auto_check:
+            continue
+        pruefung = regelpruefung.NACH_KEY.get(r.auto_check)
+        if pruefung is None:
+            erlaubt = ", ".join(p.key for p in regelpruefung.PRUEFUNGEN)
+            raise HTTPException(
+                400, f"Unbekannte Prüfung: {r.auto_check} ({erlaubt})"
+            )
+        # Eine Zahlenregel ohne Zahl bliebe bei jedem Trade offen -- und
+        # das sähe aus wie ein Fehler in den Daten statt in der Eingabe.
+        if pruefung.einheit and regelpruefung.parameter_lesen(r.auto_param) is None:
+            raise HTTPException(
+                400,
+                f"„{pruefung.label}“ braucht eine Zahl in {pruefung.einheit}"
+                + (f", zum Beispiel {pruefung.beispiel}." if pruefung.beispiel else "."),
+            )
+
 
 def _pruefe_namen(name: str) -> str:
     text = name.strip()
@@ -1997,6 +2143,27 @@ def _pruefe_namen(name: str) -> str:
     if len(text) > 120:
         raise HTTPException(400, "Name zu lang (höchstens 120 Zeichen)")
     return text
+
+
+@app.get("/api/pruefungen")
+def pruefungen(nutzer: db.User = Depends(aktueller_nutzer)):
+    """Die Regeln, die sich aus den Daten beantworten lassen.
+
+    Die Oberfläche baut daraus die Auswahlliste im Playbook-Editor. Sie
+    fest einzutragen hiesse, sie an zwei Stellen zu pflegen -- und die
+    Beschreibung, warum eine Prüfung manchmal offen bleibt, gehört an die
+    Prüfung und nicht in eine zweite Datei.
+    """
+    return [
+        {
+            "key": p.key,
+            "label": p.label,
+            "einheit": p.einheit,
+            "beschreibung": p.beschreibung,
+            "beispiel": p.beispiel,
+        }
+        for p in regelpruefung.PRUEFUNGEN
+    ]
 
 
 @app.get("/api/playbooks")
@@ -2040,8 +2207,12 @@ def playbook_anlegen(
                 playbook_id=buch.id,
                 group_label=r.group.strip() or "Allgemein",
                 text=r.text.strip(),
-                checkable=r.checkable,
+                # Eine gemessene Regel ist immer abhakbar -- sie wird ja
+                # beantwortet, nur nicht von Hand.
+                checkable=r.checkable or bool(r.auto_check),
                 sort_order=i,
+                auto_check=r.auto_check or None,
+                auto_param=(r.auto_param or "").strip() or None,
             )
         )
 
@@ -2140,16 +2311,20 @@ def playbook_regeln_setzen(
                     playbook_id=buch.id,
                     group_label=eingabe.group.strip() or "Allgemein",
                     text=eingabe.text.strip(),
-                    checkable=eingabe.checkable,
+                    checkable=eingabe.checkable or bool(eingabe.auto_check),
                     sort_order=i,
+                    auto_check=eingabe.auto_check or None,
+                    auto_param=(eingabe.auto_param or "").strip() or None,
                 )
             )
             continue
         regel = vorhanden[eingabe.id]
         regel.group_label = eingabe.group.strip() or "Allgemein"
         regel.text = eingabe.text.strip()
-        regel.checkable = eingabe.checkable
+        regel.checkable = eingabe.checkable or bool(eingabe.auto_check)
         regel.sort_order = i
+        regel.auto_check = eingabe.auto_check or None
+        regel.auto_param = (eingabe.auto_param or "").strip() or None
 
     session.commit()
     session.refresh(buch)
@@ -2225,7 +2400,7 @@ def trade_regeln_setzen(
 
     if zeile.playbook_id is None:
         if not antworten:
-            return trade_block(zeile)
+            return trade_block(zeile, regel_kontext(session, [zeile]).get(zeile.id))
         raise HTTPException(
             400, "Erst ein Playbook zuordnen, dann die Regeln beantworten"
         )
@@ -2233,11 +2408,22 @@ def trade_regeln_setzen(
     buch = hole_eigenes_playbook(session, nutzer, zeile.playbook_id)
     erlaubt = {r.id for r in buch.rules}
 
+    gemessen = {r.id: r for r in buch.rules if r.auto_check}
+
     gesehen: dict[int, bool] = {}
     for a in antworten:
         if a.rule_id not in erlaubt:
             raise HTTPException(
                 400, f"Regel {a.rule_id} gehört nicht zum Playbook dieses Trades"
+            )
+        # Eine gemessene Regel ist keine Meinung. Liesse man sie setzen,
+        # stünde in der Datenbank ein Häkchen, das die Antwort nie
+        # verändert -- und der Nutzer sähe seinen Klick verpuffen, ohne zu
+        # verstehen warum.
+        if a.rule_id in gemessen:
+            raise HTTPException(
+                400,
+                f"„{gemessen[a.rule_id].text}“ wird gemessen, nicht abgehakt",
             )
         # Doppelte in der Eingabe: die letzte gilt.
         gesehen[a.rule_id] = a.checked
@@ -2255,7 +2441,7 @@ def trade_regeln_setzen(
 
     session.commit()
     session.refresh(zeile)
-    return trade_block(zeile)
+    return trade_block(zeile, regel_kontext(session, [zeile]).get(zeile.id))
 
 
 # ---------------------------------------------------------------------------
