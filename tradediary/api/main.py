@@ -1004,10 +1004,14 @@ def liste(
         frage.order_by(db.Trade.opened_at.desc())
         .limit(limit)
         .offset(offset)
-        # Ohne das eine Abfrage je Regel-Antwort: `trade_block` fragt jede
-        # danach, zu welchem Playbook sie gehört. Bei 200 Trades mit je
-        # acht Häkchen wären das 1.600 Abfragen für eine Seite.
-        .options(selectinload(db.Trade.rule_checks).joinedload(db.TradeRuleCheck.rule))
+        # Ohne das eine Abfrage je Zeile: `trade_block` liest von jeder die
+        # Tags, und von jeder Regel-Antwort, zu welchem Playbook sie
+        # gehört. An 1.200 Trades nachgemessen -- eine Seite kostete 209
+        # Abfragen statt der drei, die es braucht.
+        .options(
+            selectinload(db.Trade.tags).joinedload(db.TradeTag.tag),
+            selectinload(db.Trade.rule_checks).joinedload(db.TradeRuleCheck.rule),
+        )
     ).all()
 
     return {

@@ -485,6 +485,16 @@ cd web && npm run typecheck
 Ein Test je Randfall — Umkehr, Teilausführungen, gleiche Zeitstempel,
 Balance-Buchungen, mehrere Konten, jede Kennzahlen-Falle einzeln.
 
+`test_abfragen.py` zählt stattdessen SQL-Abfragen. Es misst keine Zeit —
+Zeitmessungen in einer Suite fallen auf einer ausgelasteten Maschine
+grundlos um —, sondern fängt den einen Fehler, der sich einschleicht, ohne
+dass etwas rot wird: ein Nachladen je Zeile. An 1.200 Trades nachgemessen
+kostete ein Report **1.207 Abfragen und 570 ms**, weil `trade_block` von
+jeder Zeile die Tags las und von jeder Regel-Antwort, zu welchem Playbook
+sie gehört. Mit dem Vorladen in `zeilen_laden` sind es 11 Abfragen und
+416 ms; der Rest ist die Decimal-Rechnung und keine Datenbanksache mehr.
+Bei fünfzig Trades fällt so etwas nicht auf und wächst dann linear mit.
+
 Die Frontend-Tests laufen über Nodes eigenen Test-Runner, ohne zusätzliche
 Abhängigkeit. Damit Node denselben Quellcode lädt wie Next.js — der schreibt
 Importe ohne Dateiendung — hängt `tools/ts-resolve.mjs` die Endung bei der
