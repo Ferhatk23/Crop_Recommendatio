@@ -40,6 +40,7 @@ tradediary/
 │   └── mt5_source.py  # MT5-Deals -> Kern-Deals, samt Zeitzonen-Rechnung
 ├── db/
 │   ├── models.py      # SQLAlchemy-Schema
+│   ├── wanderung.py   # neue Spalten in bestehende Tabellen nachtragen
 │   └── repository.py  # Speichern, Neuberechnen, Lesen
 ├── sicherheit.py      # Passwörter (scrypt) und Sitzungsmarken
 ├── api/
@@ -550,6 +551,46 @@ fängt `deploy/sicherung.py` ab.
 | `TRADEDIARY_COOKIE_SAMESITE` | `lax` | nur ändern, wenn Oberfläche und API auf verschiedenen Domains liegen |
 | `NEXT_PUBLIC_API_BASE` | `http://127.0.0.1:8000` | wohin die Oberfläche fragt |
 
+## Aktualisieren
+
+`init_db()` bringt die Datenbank beim Hochfahren auf Stand, in zwei
+Schritten — weil sie verschiedene Dinge können:
+
+- **`create_all` legt fehlende Tabellen an** und fasst vorhandene nicht an.
+- **`db/wanderung.py` hängt fehlende Spalten an vorhandene Tabellen.**
+
+Der zweite Schritt steht da wegen eines Fehlers, der genau einmal
+passiert ist und beim nächsten Mal wieder niemandem aufgefallen wäre:
+`playbook_rules` bekam `auto_check` und `auto_param`; eine bestehende
+Datenbank behielt die alte Tabelle; die App startete sauber, meldete
+nichts, und starb erst beim ersten Aufruf von `/api/playbooks` mit
+`no such column`. Nachgestellt und gemessen, nicht vermutet — und das ist
+die unangenehmste Sorte Fehler, weil sie in der Entwicklung nie auftritt:
+dort ist die Datenbank immer frisch.
+
+Drei Festlegungen:
+
+- **Kein Alembic.** Sein Wert liegt in Autogenerate, Downgrades und
+  Verzweigungen. Für ein Journal mit einem Nutzer ist davon nichts nötig,
+  und Autogenerate wäre an SQLite ohnehin heikel. Zurückrollen tut hier
+  die tägliche Sicherung.
+- **Selbsterkennend statt durchnummeriert.** Eine bestehende Datenbank ist
+  älter als jede Versionstabelle; ihr eine Nummer zuzuweisen hiesse zu
+  raten. Jeder Schritt prüft am Schema selbst, ob er gebraucht wird — und
+  ist damit wiederholbar. `schema_wanderungen` protokolliert, was lief,
+  entscheidet aber nichts; wer die Tabelle löscht, macht nichts kaputt.
+- **Nur Spalten anhängen.** Ein Schritt besteht aus Tabelle, Spalte und
+  Typ, nicht aus beliebigem SQL. Damit *kann* dort nichts Zerstörerisches
+  stehen. Alles Schwierigere — umbenennen, Typ ändern, Daten umbauen —
+  gehört von Hand gemacht, mit Sicherung davor, und nicht still beim
+  Hochfahren.
+
+Eine Spalte, die ohne Wanderungsschritt dazukommt, lässt
+`test_wanderung.py` rot werden und schreibt hin, was zu ergänzen ist.
+`tests/schema_stand.json` hält dafür den ältesten unterstützten Stand
+fest und wird **nicht** mitgezogen — zöge man ihn bei jeder Änderung nach,
+ginge der Test immer durch und prüfte nichts.
+
 ## Tests
 
 ```bash
@@ -679,13 +720,7 @@ Damit der Stand nicht besser klingt, als er ist:
 
 1. **Auf dem Ubuntu-Rechner einrichten** und den Sammler an ein Demo-Konto
    hängen. Die beiden verbliebenen ungeprüften Punkte, beide nur dort prüfbar.
-2. **Schema-Wanderungen.** `trade_rule_checks` ist die erste Tabelle, die zu
-   einer schon laufenden Installation dazukäme. Das geht noch von selbst:
-   `init_db()` ruft beim Start `create_all`, und an einer Datenbank ohne
-   diese Tabelle nachgemessen — sie ist nach dem nächsten Start da, mit
-   allen drei Spalten. Was `create_all` *nicht* kann, ist eine geänderte
-   Spalte. Spätestens dafür braucht es Alembic.
-3. **Weitere Prüfungen**, sobald sich im Betrieb zeigt, welche Regeln man
+2. **Weitere Prüfungen**, sobald sich im Betrieb zeigt, welche Regeln man
    wirklich jeden Abend abhakt. Die Registry in `core/regelpruefung.py`
    nimmt eine neue in wenigen Zeilen auf; die Oberfläche baut ihre
    Auswahlliste aus `/api/pruefungen` und muss dafür nicht angefasst

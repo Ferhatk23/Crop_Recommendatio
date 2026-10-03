@@ -19,6 +19,7 @@ from ..core.models import ZERO, Deal, DealEntry, DealType, Direction
 from ..core.models import Trade as KernTrade
 from ..core.roundtrip import trades_from_executions, trades_from_positions
 from . import models as db
+from .wanderung import wandern
 
 
 def engine_bauen(url: str = "sqlite:///tradediary.db"):
@@ -29,8 +30,24 @@ def engine_bauen(url: str = "sqlite:///tradediary.db"):
     return create_engine(url, **kwargs)
 
 
-def schema_anlegen(engine) -> None:
+def schema_anlegen(engine) -> list[str]:
+    """Bringt die Datenbank auf den Stand des Codes.
+
+    Zwei Schritte, weil sie verschiedene Dinge können:
+
+    * `create_all` legt **fehlende Tabellen** an und fasst vorhandene
+      nicht an.
+    * `wandern` hängt **fehlende Spalten** an vorhandene Tabellen.
+
+    Ohne den zweiten startet die App nach einer Erweiterung scheinbar
+    sauber und stirbt erst beim ersten Aufruf, der die neue Spalte
+    anfasst -- mit `no such column`, weit weg von der Ursache.
+
+    Gibt zurück, welche Spalten dazugekommen sind. Leer heisst: war schon
+    auf Stand.
+    """
     db.Base.metadata.create_all(engine)
+    return wandern(engine)
 
 
 def session_factory(engine) -> sessionmaker[Session]:

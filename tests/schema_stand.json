@@ -1,0 +1,133 @@
+{
+  "access_tokens": [
+    "account_id",
+    "created_at",
+    "id",
+    "label",
+    "last_used",
+    "token_hash",
+    "user_id"
+  ],
+  "accounts": [
+    "broker",
+    "consistency_limit",
+    "created_at",
+    "currency",
+    "daily_loss_limit",
+    "hedging",
+    "id",
+    "label",
+    "login",
+    "max_loss_limit",
+    "phase",
+    "profit_target",
+    "server",
+    "server_utc_offset",
+    "starting_balance",
+    "status",
+    "user_id",
+    "warn_threshold"
+  ],
+  "deals": [
+    "account_id",
+    "commission",
+    "entry",
+    "fee",
+    "id",
+    "imported_at",
+    "position_id",
+    "price",
+    "profit",
+    "stop_loss",
+    "swap",
+    "symbol",
+    "ticket",
+    "time_broker",
+    "time_utc",
+    "type",
+    "volume"
+  ],
+  "journal_entries": [
+    "account_id",
+    "body",
+    "entry_date",
+    "id",
+    "mood",
+    "updated_at"
+  ],
+  "playbook_rules": [
+    "checkable",
+    "group_label",
+    "id",
+    "playbook_id",
+    "sort_order",
+    "text"
+  ],
+  "playbooks": [
+    "description",
+    "id",
+    "name",
+    "user_id"
+  ],
+  "sessions": [
+    "created_at",
+    "device",
+    "expires_at",
+    "id",
+    "last_seen",
+    "token_hash",
+    "user_id"
+  ],
+  "sync_state": [
+    "account_id",
+    "deals_imported",
+    "last_deal_time",
+    "last_error",
+    "last_run_at",
+    "last_success_at",
+    "source"
+  ],
+  "tags": [
+    "id",
+    "kind",
+    "label",
+    "user_id"
+  ],
+  "trade_rule_checks": [
+    "checked",
+    "rule_id",
+    "trade_id"
+  ],
+  "trade_tags": [
+    "tag_id",
+    "trade_id"
+  ],
+  "trades": [
+    "account_id",
+    "avg_entry",
+    "avg_exit",
+    "closed_at",
+    "costs",
+    "direction",
+    "exit_volume",
+    "gross_pnl",
+    "id",
+    "initial_sl",
+    "net_pnl",
+    "note",
+    "opened_at",
+    "partial",
+    "playbook_id",
+    "position_id",
+    "r_multiple",
+    "risk_amount",
+    "symbol",
+    "volume"
+  ],
+  "users": [
+    "created_at",
+    "email",
+    "id",
+    "password_hash"
+  ]
+}

@@ -2566,7 +2566,19 @@ def sammler_ping(marke: db.Zugangsmarke = Depends(sammler_marke)):
 
 
 def init_db() -> None:
-    schema_anlegen(engine)
+    """Schema beim Hochfahren auf Stand bringen.
+
+    Eine Schema-Änderung gehört ins Protokoll, auch wenn sie glattgeht.
+    Wer nach einem Aktualisieren ein merkwürdiges Verhalten sucht, will
+    als Erstes wissen, ob die Datenbank angefasst wurde -- und das steht
+    dann in `journalctl -u tradediary-api`.
+    """
+    gewandert = schema_anlegen(engine)
+    if gewandert:
+        print(
+            "Schema erweitert: " + ", ".join(gewandert),
+            flush=True,
+        )
 
 
 init_db()
