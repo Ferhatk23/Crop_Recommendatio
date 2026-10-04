@@ -136,10 +136,35 @@ schlicht keine.
 
 ```bash
 sudo systemctl stop tradediary-api tradediary-web
-sudo -u tradediary gunzip -c /var/backups/tradediary/tradediary_2026-09-04_0400.db.gz \
-     > /var/lib/tradediary/tradediary.db
+sudo /opt/tradediary/.venv/bin/python /opt/tradediary/deploy/sicherung.py \
+    --zurueckspielen /var/backups/tradediary/tradediary_2026-09-04_0400.db.gz
 sudo systemctl start tradediary-api tradediary-web
 ```
+
+Hier stand bis vor kurzem ein `gunzip -c … > datenbank.db`. Es wurde
+einmal wirklich ausprobiert, und dabei kamen drei Fehler heraus — jeder
+davon hätte im Ernstfall zugeschlagen, also an dem Tag, an dem man eine
+Sicherung braucht:
+
+1. **Die Umleitung legt das Ziel an, bevor das Entpacken läuft.**
+   Scheitert es — falscher Pfad, kaputte Datei, volle Platte —, steht
+   eine *leere* Datei da, wo das Journal war. Und das Original ist weg.
+2. **`sudo -u tradediary … > datei` schreibt als Aufrufer.** Die
+   Umleitung macht die eigene Shell, nicht sudo. Die Datenbank gehörte
+   danach root; der Dienst läuft als `tradediary` und könnte in seine
+   eigene Datenbank nicht schreiben.
+3. **Es prüfte nichts.** Eine leere oder beschädigte Sicherung ersetzte
+   alles durch nichts.
+
+`--zurueckspielen` macht es in dieser Reihenfolge: Sicherung öffnen und
+zählen, danebenschreiben, Rechte von der alten Datei übernehmen, die alte
+Datei als `tradediary.db.vorher_<datum>` beiseitelegen, erst dann
+umbenennen. Ein Fehlschlag lässt die vorhandene Datenbank unberührt, und
+wer die falsche Sicherung erwischt hat, hat danach noch beides.
+
+Läuft die API noch, bricht es ab und sagt welcher Prozess — sonst
+schreibt der Dienst weiter in die alte, inzwischen ersetzte Datei, und
+beim nächsten Neustart ist das alles weg. Mit `--trotzdem` geht es doch.
 
 Vorher ansehen, was drin ist:
 

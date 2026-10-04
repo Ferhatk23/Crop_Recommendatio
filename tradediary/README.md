@@ -543,6 +543,16 @@ eine gültige, *leere* Datenbank ist der gefährlichste Fall, weil sie jede
 Prüfung besteht und beim Zurückspielen alles durch nichts ersetzt. Beides
 fängt `deploy/sicherung.py` ab.
 
+Dasselbe gilt für den Weg zurück, und dort stand es länger nur auf dem
+Papier: `--zurueckspielen` ist einmal wirklich gegangen worden, und dabei
+kamen drei Fehler im dokumentierten `gunzip -c … > datei` heraus — ein
+Fehlschlag hinterliess eine leere Datei da, wo das Journal war; die
+Datenbank gehörte danach dem falschen Benutzer; und geprüft wurde gar
+nichts. Jeder davon hätte an genau dem Tag zugeschlagen, an dem man eine
+Sicherung braucht. Der Ablauf steht in `deploy/README.md`, und
+`tests/test_sicherung.py` geht den ganzen Kreislauf: sichern, Datenbank
+zerstören, zurückspielen, Notizen wortgetreu wiederfinden.
+
 | Umgebungsvariable | Standard | Wofür |
 |---|---|---|
 | `TRADEDIARY_DB` | `sqlite:///tradediary.db` | Datenbank; für Postgres die URL |
