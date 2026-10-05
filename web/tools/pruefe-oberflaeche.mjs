@@ -31,7 +31,11 @@ import process from 'node:process';
 
 const BASIS = process.env.TD_WEB_URL ?? 'http://127.0.0.1:3000';
 const BILDER = process.argv.includes('--bilder');
-const BILDER_ZIEL = process.env.TD_SHOTS ?? '/tmp/td-shots';
+// Nicht nach `/tmp`: Die Bilder zeigen den vollständigen Journalinhalt --
+// Kontostände, Notizen, Symbole -- und lägen dort für jeden lesbar unter
+// einem vorhersagbaren Namen. Hier neben dem Projekt, aus dem Git
+// herausgehalten.
+const BILDER_ZIEL = process.env.TD_SHOTS ?? '.td-shots';
 
 /** Pfad zum vorinstallierten Chromium, falls Playwright seinen nicht findet. */
 const CHROME = process.env.TD_CHROME ?? null;

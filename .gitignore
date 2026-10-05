@@ -35,3 +35,7 @@ next-env.d.ts
 out/
 *.tsbuildinfo
 .DS_Store
+
+# Bildschirmfotos aus `pruefe-oberflaeche.mjs --bilder`. Sie zeigen den
+# vollständigen Journalinhalt und gehören weder ins Git noch nach /tmp.
+.td-shots/

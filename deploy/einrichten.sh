@@ -134,9 +134,24 @@ sudo -u "$NUTZER" npm ci --silent 2>/dev/null || sudo -u "$NUTZER" npm install -
 
 # Die leere Basis ist der Kern des Aufbaus: relative Pfade, ein Ursprung,
 # kein CORS. Siehe web/lib/api.ts.
+#
+# Das Bauprotokoll geht über `mktemp` und nicht nach `/tmp/tradediary-bau.log`.
+# Der feste Name war angreifbar: Dieses Skript läuft als root, und eine
+# Umleitung folgt einem Verweis. Wer die Datei vorher als Symlink auf eine
+# beliebige Systemdatei anlegt, lässt root sie überschreiben --
+# nachgemessen, nicht vermutet. `mktemp` vergibt einen unvorhersagbaren
+# Namen und legt die Datei selbst an.
+BAU_LOG="$(mktemp -t tradediary-bau.XXXXXXXX)"
+trap 'rm -f "$BAU_LOG"' EXIT
+
+# Die Umleitung macht root, nicht `$NUTZER` -- und genau so soll es sein:
+# Das Protokoll gehört dann root, und der unprivilegierte Bauprozess kann
+# es nicht überschreiben. Der gefährliche Teil war der feste Pfad, nicht
+# das.
+# shellcheck disable=SC2024
 sudo -u "$NUTZER" env NEXT_PUBLIC_API_BASE="" TD_DIST_DIR=.next-build \
-    npx next build > /tmp/tradediary-bau.log 2>&1 || {
-        echo "Bau fehlgeschlagen, letzte Zeilen:"; tail -20 /tmp/tradediary-bau.log; exit 1;
+    npx next build > "$BAU_LOG" 2>&1 || {
+        echo "Bau fehlgeschlagen, letzte Zeilen:"; tail -20 "$BAU_LOG"; exit 1;
     }
 echo "    fertig"
 

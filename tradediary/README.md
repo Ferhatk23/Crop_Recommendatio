@@ -607,6 +607,7 @@ ginge der Test immer durch und prüfte nichts.
 pytest                                        # Kern, Regeln, Import, API
 cd web && npm test                            # outcome() und Formatierung
 cd web && npm run typecheck
+shellcheck deploy/einrichten.sh               # das Skript laeuft als root
 ```
 
 Ein Test je Randfall — Umkehr, Teilausführungen, gleiche Zeitstempel,
@@ -694,6 +695,19 @@ Häkchen standen nach dem Neuladen richtig, und trotzdem sah der Nutzer
 beim Klick auf Speichern nichts. Ein Muster, das man einmal repariert
 hat, baut man beim nächsten Mal wieder ein; nur der Lauf im Browser merkt
 es.
+
+`shellcheck` steht dort, weil `einrichten.sh` mit `sudo` läuft und ein
+Fehler dann das ganze System trifft. Es hat genau einen gefunden, und der
+war echt: Das Bauprotokoll ging nach `/tmp/tradediary-bau.log` — ein
+fester Name in einem für alle schreibbaren Verzeichnis, beschrieben von
+einer root-Umleitung. Wer die Datei vorher als Verweis auf eine beliebige
+Systemdatei anlegt, lässt root sie überschreiben. Nachgemessen, nicht
+vermutet: Eine fremde Datei war danach weg. Jetzt `mktemp`.
+
+Dieselbe Form, niedrigerer Einsatz, trotzdem geändert: Die Bildschirmfotos
+aus `--bilder` lagen unter `/tmp/td-shots` und zeigen den vollständigen
+Journalinhalt. Sie liegen jetzt in `.td-shots` neben dem Projekt und sind
+aus dem Git herausgehalten.
 
 `pruefe-playbooks.mjs` prüft zusätzlich die teuerste denkbare Verwechslung:
 eine Regel umformulieren und dabei die Häkchen von Dutzenden Trades
