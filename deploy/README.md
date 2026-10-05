@@ -21,7 +21,14 @@ Danach:
 
 ```bash
 # 1. Dich selbst anlegen
-sudo -u tradediary /opt/tradediary/.venv/bin/python \
+#
+#    `env TRADEDIARY_DB=…` ist Pflicht, nicht Zierde: sudo gibt die
+#    Umgebung nicht weiter. Ohne die Zeile legt das Skript den Nutzer in
+#    einer neuen, leeren Datenbank neben dem Code an, meldet „Angelegt",
+#    und die Anmeldung scheitert danach mit „E-Mail oder Passwort stimmt
+#    nicht". Heute bricht es stattdessen ab und sagt es.
+sudo -u tradediary env TRADEDIARY_DB=sqlite:////var/lib/tradediary/tradediary.db \
+     /opt/tradediary/.venv/bin/python \
      /opt/tradediary/scripts/nutzer.py anlegen ferhat@example.com
 
 # 2. Proxy einrichten
@@ -30,7 +37,8 @@ sudo $EDITOR /etc/caddy/Caddyfile          # Domain eintragen
 sudo systemctl reload caddy
 
 # 3. Marke für den Sammler
-sudo -u tradediary /opt/tradediary/.venv/bin/python \
+sudo -u tradediary env TRADEDIARY_DB=sqlite:////var/lib/tradediary/tradediary.db \
+     /opt/tradediary/.venv/bin/python \
      /opt/tradediary/scripts/marke.py anlegen 1
 ```
 

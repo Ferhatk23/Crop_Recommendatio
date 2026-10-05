@@ -3,12 +3,15 @@
 # Richtet TradeDiary auf einem Ubuntu-Rechner ein.
 #
 #   sudo ./deploy/einrichten.sh
+#   sudo ./deploy/einrichten.sh --caddy auto --email ich@example.com
 #
 # Was passiert:
 #   1. Systemnutzer `tradediary` anlegen (ohne Anmeldemöglichkeit)
 #   2. Code nach /opt/tradediary, Datenbank nach /var/lib/tradediary
 #   3. Python-Umgebung und Frontend-Bau
 #   4. systemd-Dienste und Sicherungs-Timer
+#   5. mit `--caddy`: Proxy samt TLS, erreichbar im Heimnetz
+#   6. mit `--email`: der erste Nutzer zum Anmelden
 #
 # Das Skript ist wiederholbar: Ein zweiter Lauf aktualisiert, ohne die
 # Datenbank oder die Zugangsdaten anzufassen. Das ist der Punkt -- ein
@@ -23,6 +26,23 @@ DATEN=/var/lib/tradediary
 SICHERUNGEN=/var/backups/tradediary
 EINSTELLUNGEN=/etc/tradediary
 QUELLE="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+
+#: Leer = Caddy nicht anfassen. "auto" = lokale IP ermitteln und ein
+#: eigenes Zertifikat ausstellen. Sonst die angegebene Domain.
+CADDY_ADRESSE=""
+#: Leer = keinen Nutzer anlegen.
+NUTZER_EMAIL=""
+
+while [ $# -gt 0 ]; do
+    case "$1" in
+        --caddy) CADDY_ADRESSE="${2:?--caddy braucht auto oder eine Domain}"; shift 2 ;;
+        --email) NUTZER_EMAIL="${2:?--email braucht eine Adresse}"; shift 2 ;;
+        -h|--help)
+            sed -n '2,20p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'
+            exit 0 ;;
+        *) echo "Unbekannte Option: $1"; exit 1 ;;
+    esac
+done
 
 melde() { printf '\n\033[1m==> %s\033[0m\n' "$*"; }
 warne() { printf '\033[33m    %s\033[0m\n' "$*"; }
@@ -121,7 +141,8 @@ if [ ! -f "$DATEN/tradediary.db" ]; then
          import os; schema_anlegen(engine_bauen(os.environ['TRADEDIARY_DB']))"
     echo "    Leeres Schema angelegt"
     warne "Noch kein Nutzer. Nach dem Einrichten:"
-    warne "  sudo -u $NUTZER $ZIEL/.venv/bin/python $ZIEL/scripts/nutzer.py anlegen <email>"
+    warne "  sudo -u $NUTZER env TRADEDIARY_DB=sqlite:////var/lib/tradediary/tradediary.db \\"
+    warne "    $ZIEL/.venv/bin/python $ZIEL/scripts/nutzer.py anlegen <email>"
 else
     echo "    Vorhandene Datenbank bleibt unangetastet"
 fi
@@ -194,13 +215,98 @@ else
     echo "    Oberfläche antwortet nicht"; exit 1
 fi
 
+# --- Proxy -----------------------------------------------------------------
+#
+# Ohne diesen Schritt hören API und Oberfläche nur auf 127.0.0.1 und sind
+# vom iPad aus nicht erreichbar. Mit `--caddy auto` ermittelt das Skript
+# die Adresse dieses Rechners im Heimnetz und lässt Caddy ein eigenes
+# Zertifikat ausstellen -- ohne Domain, ohne Let's Encrypt.
+
+if [ -n "$CADDY_ADRESSE" ]; then
+    melde "Proxy einrichten"
+
+    if ! command -v caddy >/dev/null; then
+        echo "    caddy nachinstallieren"
+        apt-get install -y -qq caddy
+    fi
+
+    if [ "$CADDY_ADRESSE" = "auto" ]; then
+        # Die Adresse, mit der dieser Rechner nach draussen spricht -- das
+        # ist auch die, unter der ihn das iPhone im selben Netz erreicht.
+        CADDY_ADRESSE="$(ip -4 route get 1.1.1.1 2>/dev/null | awk '{print $7; exit}')"
+        [ -n "$CADDY_ADRESSE" ] || {
+            echo "    Konnte die lokale Adresse nicht ermitteln."
+            echo "    Mit --caddy <ip-oder-domain> selbst angeben."
+            exit 1
+        }
+        echo "    Adresse dieses Rechners: $CADDY_ADRESSE"
+        TLS_ZEILE=$'\n\t# Eigenes Zertifikat -- ohne Domain gibt es keins von Let\'s Encrypt.\n\ttls internal'
+    else
+        echo "    Domain: $CADDY_ADRESSE"
+        TLS_ZEILE=""
+    fi
+
+    install -d -m 755 /etc/caddy
+    # Eine vorhandene Konfiguration gehört nicht kommentarlos ersetzt --
+    # dort kann etwas anderes stehen, das jemand braucht.
+    if [ -f /etc/caddy/Caddyfile ] && ! grep -q "TradeDiary" /etc/caddy/Caddyfile; then
+        ALT="/etc/caddy/Caddyfile.vor_tradediary_$(date -u +%Y-%m-%d_%H%M)"
+        cp /etc/caddy/Caddyfile "$ALT"
+        warne "Bisherige Caddy-Konfiguration gesichert: $ALT"
+    fi
+
+    # Aus der Vorlage im Projekt, damit Kopfzeilen und Protokollierung
+    # nicht an zwei Stellen gepflegt werden müssen.
+    {
+        echo "# Von deploy/einrichten.sh erzeugt. TradeDiary."
+        sed -e "s|^journal\.example\.com {|${CADDY_ADRESSE} {${TLS_ZEILE}|" \
+            -e '/^# --- Im Heimnetz/,$d' \
+            "$ZIEL/deploy/Caddyfile"
+    } > /etc/caddy/Caddyfile
+    chmod 644 /etc/caddy/Caddyfile
+
+    if ! caddy validate --config /etc/caddy/Caddyfile --adapter caddyfile >/dev/null 2>&1; then
+        echo "    Die erzeugte Caddy-Konfiguration ist ungültig:"
+        caddy validate --config /etc/caddy/Caddyfile --adapter caddyfile 2>&1 | sed 's/^/      /'
+        exit 1
+    fi
+    systemctl enable --now caddy >/dev/null 2>&1 || true
+    systemctl reload caddy 2>/dev/null || systemctl restart caddy
+    echo "    Caddy lädt auf https://$CADDY_ADRESSE"
+
+    # Hinter TLS gehört das Sitzungs-Cookie auf `secure` -- sonst schickt
+    # der Browser es irgendwann nicht mehr mit.
+    if [ -f "$EINSTELLUNGEN/api.env" ]; then
+        sed -i 's/^TRADEDIARY_COOKIE_SECURE=.*/TRADEDIARY_COOKIE_SECURE=true/' \
+            "$EINSTELLUNGEN/api.env"
+        systemctl restart tradediary-api
+    fi
+fi
+
+# --- Erster Nutzer ---------------------------------------------------------
+
+if [ -n "$NUTZER_EMAIL" ]; then
+    melde "Nutzer anlegen"
+    # `nutzer.py` fragt das Passwort selbst ab und legt niemanden doppelt
+    # an -- ein zweiter Lauf des Skripts darf das Passwort nicht
+    # zurücksetzen.
+    # `env` ist nicht schmückend: sudo gibt die Umgebung nicht weiter, und
+    # ohne TRADEDIARY_DB landete der Nutzer in einer neuen, leeren Datenbank
+    # neben dem Code statt in der des Dienstes. Beim ersten echten
+    # Installationslauf genau so passiert.
+    sudo -u "$NUTZER" env "TRADEDIARY_DB=sqlite:////var/lib/tradediary/tradediary.db" \
+        "$ZIEL/.venv/bin/python" "$ZIEL/scripts/nutzer.py" \
+        anlegen "$NUTZER_EMAIL" || warne "Nutzer gibt es vermutlich schon -- übersprungen"
+fi
+
 melde "Fertig"
 cat <<ENDE
 Beide Dienste laufen auf 127.0.0.1 -- von aussen noch nicht erreichbar.
 Das ist Absicht: Davor gehört ein Proxy mit TLS.
 
   1. Nutzer anlegen
-     sudo -u $NUTZER $ZIEL/.venv/bin/python $ZIEL/scripts/nutzer.py anlegen <email>
+     sudo -u $NUTZER env TRADEDIARY_DB=sqlite:////var/lib/tradediary/tradediary.db \\
+       $ZIEL/.venv/bin/python $ZIEL/scripts/nutzer.py anlegen <email>
 
   2. Caddy einrichten
      sudo apt install caddy
@@ -209,7 +315,8 @@ Das ist Absicht: Davor gehört ein Proxy mit TLS.
      sudo systemctl reload caddy
 
   3. Marke für den Sammler
-     sudo -u $NUTZER $ZIEL/.venv/bin/python $ZIEL/scripts/marke.py anlegen 1
+     sudo -u $NUTZER env TRADEDIARY_DB=sqlite:////var/lib/tradediary/tradediary.db \\
+       $ZIEL/.venv/bin/python $ZIEL/scripts/marke.py anlegen 1
 
 Protokolle:  journalctl -u tradediary-api -f
 Sicherung:   systemctl start tradediary-sicherung   # von Hand auslösen

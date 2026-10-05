@@ -432,6 +432,35 @@ gerade in ein Feld getippt hat, findet die Stelle sonst nicht wieder.
 gehört auf `status: verloren`, nicht in den Papierkorb — seine Trades sind
 die Lehre, für die man bezahlt hat.
 
+## Die Verwaltungsskripte und sudo
+
+`nutzer.py` und `marke.py` laufen im Betrieb als `sudo -u tradediary …`,
+und darin steckte eine Falle, die erst der erste echte Installationslauf
+gezeigt hat: **sudo gibt die Umgebung nicht weiter.** `TRADEDIARY_DB` war
+damit nicht gesetzt, die Skripte fielen auf den relativen Standardwert
+zurück, und SQLite legte bereitwillig eine neue, leere Datenbank im
+Arbeitsverzeichnis an.
+
+Der Nutzer landete also in `/opt/tradediary/tradediary.db` statt in
+`/var/lib/tradediary/tradediary.db`. Das Skript meldete „Angelegt",
+alles sah richtig aus — und die Anmeldung scheiterte danach mit
+**„E-Mail oder Passwort stimmt nicht"**. Eine Meldung, die in die völlig
+falsche Richtung zeigt: Wer das nicht weiss, sucht beim Passwort und
+findet den Fehler nie. Und das beim allerersten Schritt, bevor
+irgendetwas anderes je zum Zuge kommt.
+
+Zwei Dinge dagegen:
+
+- **Eine Datenbank wird nie beiläufig erzeugt.** Zeigt die URL auf eine
+  SQLite-Datei, die es nicht gibt, bricht das Skript ab und nennt sudo als
+  wahrscheinliche Ursache samt dem Befehl, der es richtig macht. Wer
+  wirklich eine neue anlegen will, sagt `--neu`.
+- **Jede dokumentierte Zeile gibt `env TRADEDIARY_DB=…` mit** — und ein
+  Test geht `deploy/README.md` und `einrichten.sh` durch und lässt rot
+  werden, wenn irgendwo ein `sudo`-Aufruf ohne sie steht. Der Fehler
+  stand in drei Dateien gleichzeitig; ihn an einer zu beheben und die
+  anderen zu vergessen wäre das Naheliegende gewesen.
+
 ## Anmeldung
 
 Serverseitige Sitzungen in einem HttpOnly-Cookie. Vier Entscheidungen, die
@@ -733,10 +762,19 @@ Damit der Stand nicht besser klingt, als er ist:
   mitgeben, nicht in der Oberfläche einstellen. Die Erkennung trifft die
   gängigen Broker-Exporte von selbst; bei einem exotischen Format braucht es
   einen API-Aufruf von Hand.
-- **Der erste Lauf von `einrichten.sh` auf dem Zielrechner.** Der Aufbau ist
-  gegen echtes Caddy durchgemessen und alle systemd-Units validieren, aber
-  `useradd`, Systempfade und das Zusammenspiel unter laufendem systemd liessen
-  sich hier nicht ausprobieren — in diesem Container ist systemd offline.
+- **Das Zusammenspiel unter laufendem systemd.** Alles davor ist
+  inzwischen wirklich gelaufen: `einrichten.sh` hat hier einen Systemnutzer
+  angelegt, den Code nach `/opt/tradediary` gelegt, die Python-Umgebung
+  gebaut, das Schema in `/var/lib/tradediary` angelegt und die Oberfläche
+  gebaut — und ein zweiter Lauf hat „Vorhandene Datenbank bleibt
+  unangetastet" gemeldet, womit die Wiederholbarkeit belegt ist statt
+  behauptet. Beide Dienste wurden anschliessend von Hand aus `/opt`
+  gestartet, als Dienstnutzer, mit den Befehlszeilen aus den Units:
+  Anmeldung und geschützte Seiten antworteten. Was offen bleibt, ist
+  `systemctl` selbst — in diesem Container ist PID 1 nicht systemd.
+
+  Der Lauf hat einen Fehler zutage gebracht, der jeden Erstinstallierer
+  beim allerersten Schritt erwischt hätte; siehe unten.
 - **Zwei-Faktor-Anmeldung.** Für ein Konto, das ins Internet zeigt, wäre sie
   angebracht; für den Betrieb im Heimnetz ist sie es nicht.
 

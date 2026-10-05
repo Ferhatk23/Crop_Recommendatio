@@ -25,16 +25,18 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from sqlalchemy import func, select
 
 from tradediary.db import models as m
-from tradediary.db.repository import engine_bauen, schema_anlegen, session_factory
+from tradediary.db.repository import session_factory
 from tradediary.sicherheit import MINDESTLAENGE, PasswortZuKurz, hashe_passwort
 
-URL = os.environ.get("TRADEDIARY_DB", "sqlite:///tradediary.db")
+from datenbank import datenbank_url, sitzung  # noqa: E402
+
+URL = datenbank_url()
 
 
 def _sitzung():
-    engine = engine_bauen(URL)
-    schema_anlegen(engine)
-    return session_factory(engine)()
+    """Siehe `scripts/datenbank.py` -- bricht ab statt eine leere
+    Datenbank am falschen Ort anzulegen."""
+    return sitzung(anlegen_erlaubt="--neu" in sys.argv)
 
 
 def _passwort_abfragen() -> str:
