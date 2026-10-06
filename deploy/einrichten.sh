@@ -58,6 +58,9 @@ command -v node    >/dev/null || fehlt+=("nodejs")
 command -v npm     >/dev/null || fehlt+=("npm")
 command -v rsync   >/dev/null || fehlt+=("rsync")
 command -v curl    >/dev/null || fehlt+=("curl")
+# Für die Prüfung auf belegte Ports weiter unten.
+command -v ss      >/dev/null || fehlt+=("iproute2")
+command -v ps      >/dev/null || fehlt+=("procps")
 python3 -c "import venv" 2>/dev/null || fehlt+=("python3-venv")
 
 if [ ${#fehlt[@]} -gt 0 ]; then
@@ -188,6 +191,54 @@ install -m 644 "$ZIEL/deploy/tradediary-sicherung.service" /etc/systemd/system/
 install -m 644 "$ZIEL/deploy/tradediary-sicherung.timer"   /etc/systemd/system/
 
 systemctl daemon-reload
+
+# --- Verwaiste Vorgänger ---------------------------------------------------
+#
+# Ein `next start` oder `uvicorn` aus einem früheren Versuch hält den Port
+# weiter, und der frisch gestartete Dienst scheitert dann mit EADDRINUSE --
+# einer Meldung, die im Journal zwischen Neustartversuchen untergeht. Beim
+# ersten echten Einsatz genau so passiert: Der Dienst lief im Kreis, und
+# die Ursache stand nicht da, wo man sie suchte.
+#
+# Beendet wird nur, was unmissverständlich zu dieser Installation gehört:
+# ein Prozess des Dienstnutzers. Alles andere wird benannt, nicht
+# angefasst -- auf dem Port kann etwas Fremdes liegen, das jemand braucht.
+
+melde "Belegte Ports prüfen"
+systemctl stop tradediary-api tradediary-web 2>/dev/null || true
+sleep 1
+
+for eintrag in "3000:Oberfläche" "8000:API"; do
+    PORT="${eintrag%%:*}"
+    WAS="${eintrag##*:}"
+
+    # `|| true` ist hier nicht Schlamperei, sondern nötig: Findet grep
+    # nichts -- also wenn der Port frei ist, der Normalfall --, endet die
+    # Pipe mit 1, und unter `set -euo pipefail` bricht das ganze Skript ab.
+    # Beim Ausprobieren genau so passiert: Der Installer starb an einem
+    # freien Port.
+    PIDS="$(ss -tlnpH "sport = :$PORT" 2>/dev/null \
+        | grep -oP 'pid=\K[0-9]+' | sort -u || true)"
+    [ -n "$PIDS" ] || { echo "    $PORT ($WAS) frei"; continue; }
+
+    for pid in $PIDS; do
+        BESITZER="$(ps -o user= -p "$pid" 2>/dev/null | tr -d ' ')"
+        BEFEHL="$(ps -o args= -p "$pid" 2>/dev/null | cut -c1-70)"
+        if [ "$BESITZER" = "$NUTZER" ]; then
+            echo "    $PORT: verwaister Vorgänger (PID $pid) beendet"
+            kill "$pid" 2>/dev/null || true
+        else
+            echo "    $PORT ($WAS) ist belegt und gehört nicht hierher:"
+            echo "      PID $pid, Nutzer $BESITZER"
+            echo "      $BEFEHL"
+            echo
+            echo "    Erst klären, was das ist. TradeDiary würde es überdecken."
+            exit 1
+        fi
+    done
+done
+sleep 2
+
 systemctl enable --now tradediary-api tradediary-web tradediary-sicherung.timer
 
 sleep 3

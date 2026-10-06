@@ -9,7 +9,7 @@ iPad und vom iPhone — verschlüsselt, mit Anmeldung, mit täglicher Sicherung.
 git clone -b claude/tradezella-neues-projekt-ob2nbi \
     https://github.com/Ferhatk23/Crop_Recommendatio tradediary
 cd tradediary
-sudo apt install python3-venv nodejs npm rsync curl caddy
+sudo apt install python3-venv nodejs npm rsync curl caddy iproute2 procps
 sudo ./deploy/einrichten.sh --caddy auto --email ferhat@example.com
 ```
 
