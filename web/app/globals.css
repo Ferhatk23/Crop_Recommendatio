@@ -1,0 +1,398 @@
+/* Archivo, selbst ausgeliefert.
+ *
+ * Bewusst nicht über das CDN: Die App soll als Web-App auf dem
+ * Home-Bildschirm liegen und auch dann Zahlen richtig setzen, wenn das
+ * Netz schlecht ist. Eine Schrift, die per CDN nachgeladen wird, fällt
+ * bei Netzproblemen auf system-ui zurück -- und damit auf Ziffern ohne
+ * feste Breite. In einer Trade-Liste springen dann die Spalten.
+ *
+ * Eine Datei für alle Schnitte: Archivo ist eine Variable Font, die
+ * Gewichte 400/600/800 stecken in derselben Datei.
+ */
+@font-face {
+  font-family: 'Archivo';
+  font-style: normal;
+  font-weight: 100 900;
+  font-display: swap;
+  src: url('/fonts/archivo-variable.woff2') format('woff2-variations');
+  /* Nur die Zeichen, die eine deutsche Oberfläche braucht. */
+  unicode-range: U+0000-00FF, U+0131, U+0152-0153, U+02BB-02BC, U+02C6,
+    U+02DA, U+02DC, U+0304, U+0308, U+0329, U+2000-206F, U+2074, U+20AC,
+    U+2122, U+2191, U+2193, U+2212, U+2215, U+FEFF, U+FFFD;
+}
+
+/* TradeDiary — Design-Tokens.
+ *
+ * Zwei getrennte Blöcke, von Hand gesetzt. Keine Ableitung, keine
+ * Invertierung zur Laufzeit: #0f6f43 wäre auf #171615 unlesbar und
+ * #ec3013 würde dort flimmern. Wer einen Token ergänzt, ergänzt ihn in
+ * beiden Blöcken — ein fehlender Dunkel-Wert fällt sonst erst dem
+ * Nutzer auf.
+ *
+ * Regel 1: Grün und Rot gehören dem Ergebnis. Der Akzent ist Tinte und
+ * wechselt mit dem Modus die Seite.
+ */
+
+:root {
+  --td-bg: #f3f2f2;
+  --td-surface: #eae9e9;
+  --td-sunk: #e2e0df;
+  --td-text: #201e1d;
+  --td-accent: #201e1d;
+  --td-on-accent: #f3f2f2;
+  --td-divider: #201e1d40;
+  --td-line: #d7d3d3;
+  --td-neutral: #7d7979;
+  --td-neutral-t: #e6e4e4;
+
+  --td-pos: #0f6f43;
+  --td-pos-tint: #e2efe7;
+  --td-neg: #b7250c;
+  --td-neg-str: #ec3013;
+  --td-neg-tint: #f7e2dd;
+
+  --td-radius: 0;
+  --td-tap: 44px;
+
+  --td-rail: 216px;
+  --td-rail-icon: 64px;
+
+  --td-dur-fast: 120ms;
+  --td-dur-base: 180ms;
+  --td-dur-slow: 260ms;
+  --td-ease: cubic-bezier(0.2, 0, 0, 1);
+}
+
+[data-theme='dark'] {
+  --td-bg: #171615;
+  --td-surface: #201f1e;
+  --td-sunk: #0e0d0d;
+  --td-text: #f0eeec;
+  --td-accent: #f0eeec;
+  --td-on-accent: #171615;
+  --td-divider: #5a5754;
+  --td-line: #332f2d;
+  --td-neutral: #8e8a88;
+  --td-neutral-t: #2b2928;
+
+  --td-pos: #5cc98d;
+  --td-pos-tint: #1d2f24;
+  --td-neg: #f2603f;
+  --td-neg-str: #ff7a5c;
+  --td-neg-tint: #33201b;
+}
+
+*,
+*::before,
+*::after {
+  box-sizing: border-box;
+  border-radius: var(--td-radius);
+}
+
+html,
+body {
+  margin: 0;
+  padding: 0;
+}
+
+body {
+  background: var(--td-bg);
+  color: var(--td-text);
+  font-family: 'Archivo', system-ui, -apple-system, 'Segoe UI', sans-serif;
+  /* Global, einmal — nicht pro Komponente, sonst wird eine vergessen. */
+  font-variant-numeric: tabular-nums slashed-zero;
+  font-feature-settings: 'tnum' 1, 'zero' 1;
+  -webkit-font-smoothing: antialiased;
+  font-size: 13px;
+  line-height: 1.55;
+}
+
+/* Rollen ------------------------------------------------------------- */
+
+.td-display {
+  font-weight: 800;
+  letter-spacing: -0.03em;
+  line-height: 1.02;
+}
+
+.td-label {
+  font-size: 10px;
+  font-weight: 400;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  color: var(--td-neutral);
+}
+
+/* Nur für Bildschirmleser. Nicht `display: none` -- das nähme den Text
+   auch ihnen weg. Wird dort gebraucht, wo die Anzeige aus Zeichen und
+   Kleingedrucktem besteht, die vorgelesen kein Satz mehr ergeben. */
+.td-sr {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip-path: inset(50%);
+  white-space: nowrap;
+  border: 0;
+}
+
+.td-body {
+  font-weight: 400;
+  line-height: 1.55;
+}
+
+/* Ergebnisfarben. Immer zusammen mit einem Vorzeichen und einer
+ * Regelposition verwendet — Farbe ist nie der einzige Kanal. */
+.td-pos { color: var(--td-pos); }
+.td-neg { color: var(--td-neg); }
+.td-neutral { color: var(--td-neutral); }
+
+/* Die Ergebnis-Regel als Rahmenposition: oben = Gewinn, unten = Verlust.
+ * Der zweite Kanal neben der Farbe, damit Rot-Grün-Sehschwäche die
+ * Information nicht verliert. */
+.td-rule-top { border-top: 3px solid var(--td-pos); }
+.td-rule-bottom { border-bottom: 3px solid var(--td-neg-str); }
+.td-rule-none { border-top: 3px solid var(--td-neutral); }
+
+/* Struktur ----------------------------------------------------------- */
+
+.td-divider { border: 0; border-top: 2px solid var(--td-divider); margin: 0; }
+.td-line { border: 0; border-top: 1px solid var(--td-line); margin: 0; }
+
+/* Interaktive Elemente halten das Mindest-Tippziel ein. */
+button,
+a.td-tap,
+.td-tap {
+  min-height: var(--td-tap);
+}
+
+button {
+  font: inherit;
+  color: inherit;
+  background: none;
+  border: 0;
+  cursor: pointer;
+  text-align: left;
+}
+
+a { color: inherit; text-decoration: none; }
+
+:focus-visible {
+  outline: 2px solid var(--td-accent);
+  outline-offset: 2px;
+}
+
+::selection {
+  background: var(--td-accent);
+  color: var(--td-on-accent);
+}
+
+/* Schraffur für die Warnzone des Regel-Puffers. Ein zweiter Kanal neben
+ * der Farbe — man sieht die Gefahr auch ohne Rot zu erkennen. */
+.td-hatch {
+  background-image: repeating-linear-gradient(
+    45deg,
+    var(--td-neg-str) 0 2px,
+    transparent 2px 6px
+  );
+}
+
+table { border-collapse: collapse; width: 100%; }
+
+input,
+textarea,
+select {
+  font: inherit;
+  color: var(--td-text);
+  background: var(--td-bg);
+  border: 1px solid var(--td-line);
+  padding: 8px 10px;
+  min-height: var(--td-tap);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    transition-duration: 0.01ms !important;
+  }
+}
+
+/* ==================================================================
+ * Grundriss — drei Breiten.
+ *
+ * 390 px  Tab-Leiste unten, keine Seitenleiste
+ * 834 px  Symbolspalte 64 px
+ * 1280 px Seitenleiste 216 px mit Beschriftung
+ *
+ * Die schmale Breite ist keine Nachrüstung: Der Kalender und die
+ * Trade-Liste sind dort entworfen worden, nicht dorthin gequetscht.
+ * ================================================================== */
+
+.td-shell {
+  display: flex;
+  min-height: 100vh;
+}
+
+.td-rail {
+  display: none;
+  flex-direction: column;
+  background: var(--td-surface);
+  border-right: 2px solid var(--td-divider);
+  flex-shrink: 0;
+}
+
+.td-main {
+  flex: 1;
+  min-width: 0;
+  padding: 16px 16px 76px; /* Platz für die Tab-Leiste */
+  max-width: 1180px;
+}
+
+.td-tabbar {
+  position: fixed;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  display: flex;
+  background: var(--td-surface);
+  border-top: 2px solid var(--td-divider);
+  /* Über dem Home-Indikator, nicht darunter. */
+  padding-bottom: env(safe-area-inset-bottom, 0);
+  z-index: 20;
+}
+
+/* Sichtbarkeits-Helfer */
+.nur-schmal { display: block; }
+.nur-breit,
+.nur-tablet,
+.nur-tablet-inline { display: none; }
+.nur-breit-inline { display: inline; }
+
+@media (min-width: 720px) {
+  .td-rail { display: flex; width: var(--td-rail-icon); }
+  .td-tabbar { display: none; }
+  .td-main { padding: 20px 22px; }
+
+  .nur-schmal { display: none; }
+  .nur-tablet { display: block; }
+  .nur-tablet-inline { display: inline; }
+  .nur-breit-inline { display: none; }
+
+  /* Auf der Symbolspalte nur Icons — die beschriftete Fassung wird
+     ausgeblendet, damit sie nicht doppelt erscheint. */
+  .td-rail > nav:first-of-type { display: none; }
+}
+
+@media (min-width: 1100px) {
+  .td-rail { width: var(--td-rail); }
+  .td-main { padding: 24px 28px; }
+
+  .nur-breit { display: block; }
+  .nur-tablet,
+  .nur-tablet-inline { display: none; }
+  .nur-breit-inline { display: inline; }
+
+  .td-rail > nav:first-of-type { display: flex; }
+}
+
+/* Raster für Kachelreihen: stoßen mit 2 px Fuge aneinander.
+ *
+ * `minmax(0, 1fr)`, nicht `1fr`. Der Unterschied ist der zwischen einer
+ * Oberfläche, die auf dem Telefon passt, und einer, die seitlich
+ * wegläuft: `1fr` bedeutet `minmax(auto, 1fr)`, und `auto` heißt, dass
+ * eine Spalte nie schmaler wird als ihr breitester unteilbarer Inhalt.
+ * Die Kennzahlen stehen aber bewusst in `white-space: nowrap` -- damit
+ * das Euro-Zeichen nicht allein in der zweiten Zeile landet. Beides
+ * zusammen ergab auf 390 px zwei Spalten zu 224 und 235 px in einem
+ * Container von 358 px: 87 px waagerechter Überlauf auf jeder Seite.
+ *
+ * Mit `minmax(0, ...)` darf die Spalte kleiner werden als ihr Inhalt;
+ * die Kachel bekommt dafür unten `min-width: 0` und schneidet notfalls
+ * ab, statt das ganze Raster zu sprengen.
+ */
+.td-grid {
+  display: grid;
+  gap: 2px;
+}
+.td-grid-2 { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+.td-grid-3 { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+.td-grid-4 { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+
+@media (min-width: 720px) {
+  .td-grid-3 { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+  .td-grid-4 { grid-template-columns: repeat(4, minmax(0, 1fr)); }
+}
+
+/* Rasterkinder dürfen schrumpfen. Ohne das setzt sich die
+ * Mindestbreite des Inhalts über die Spaltenbreite hinweg -- derselbe
+ * Mechanismus wie oben, nur eine Ebene tiefer. */
+.td-grid > * { min-width: 0; }
+
+/* Die Reihe mit den Leitzahlen -- eigene Leiter, weil sie eine eigene
+ * Zwangslage hat.
+ *
+ * Nachgemessen auf 390 px: In einer zweispaltigen Zelle bleiben 142 px
+ * Inhaltsbreite. "+24.129,46 €" braucht in der Leitgröße 233 px, und
+ * selbst auf 22 px heruntergesetzt noch 135 px -- bei einem sechsstelligen
+ * Konto wäre auch das wieder zu wenig. Zwei Spalten können auf dem
+ * Telefon also keine Leitzahl tragen; sie abzuschneiden ("+24.129,4")
+ * verbietet sich, denn eine halbe Zahl ist eine falsche Zahl.
+ *
+ * Deshalb hier eine Spalte, bis genug Platz da ist: ab 560 px zwei,
+ * ab 900 px vier. Die volle Breite trägt die Leitgröße mit Abstand.
+ */
+.td-grid-kpi { grid-template-columns: minmax(0, 1fr); }
+
+@media (min-width: 560px) {
+  .td-grid-kpi { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+}
+@media (min-width: 900px) {
+  .td-grid-kpi { grid-template-columns: repeat(4, minmax(0, 1fr)); }
+}
+
+/* Über die volle Breite braucht die Kachel ihre Mindesthöhe nicht: Die
+ * gab es, damit sie in einer schmalen Spalte nicht zum Streifen wird. */
+.td-kpi-gross { min-height: auto; }
+
+@media (min-width: 560px) {
+  .td-kpi-gross { min-height: 132px; }
+}
+
+.td-section {
+  margin-top: 22px;
+  padding-top: 14px;
+  border-top: 2px solid var(--td-divider);
+}
+
+.td-card {
+  background: var(--td-surface);
+  padding: 14px 16px;
+}
+
+.td-scroll-x {
+  overflow-x: auto;
+  -webkit-overflow-scrolling: touch;
+}
+
+/* Tabelle gegen Karten.
+ *
+ * Eigene Klassen statt der allgemeinen Sichtbarkeits-Helfer, und zwar
+ * aus einem Grund: Die Helfer schalten bei 720 und bei 1100 um. Wer die
+ * Tabelle an `.nur-breit` (ab 1100) und die Karten an `.nur-schmal`
+ * (bis 720) haengt, hat zwischen 720 und 1099 -- also genau auf dem
+ * iPad -- *beides* ausgeblendet und eine leere Liste.
+ *
+ * Die Anordnung steht ebenfalls hier und nicht als inline-style: Ein
+ * inline `display` schlaegt jede Klasse.
+ */
+.td-tabelle { display: none; }
+.td-karten { display: flex; flex-direction: column; gap: 2px; }
+
+@media (min-width: 720px) {
+  .td-tabelle { display: block; }
+  .td-karten { display: none; }
+}

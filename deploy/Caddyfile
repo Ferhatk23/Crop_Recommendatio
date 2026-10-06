@@ -1,0 +1,80 @@
+# TradeDiary hinter Caddy.
+#
+# Caddy holt und erneuert das TLS-Zertifikat von selbst -- das ist der
+# Grund, warum hier Caddy steht und nicht nginx. Ein abgelaufenes
+# Zertifikat merkt man sonst daran, dass das iPhone die Seite nicht mehr
+# öffnet, und das immer am ungünstigsten Tag.
+#
+# Nach /etc/caddy/Caddyfile kopieren und die Domain eintragen.
+
+journal.example.com {
+
+	# --- Ein Ursprung für alles --------------------------------------------
+	#
+	# Oberfläche und API liegen hinter derselben Domain: /api/* geht an
+	# die API, alles andere an die Oberfläche. Damit gibt es kein CORS,
+	# das Sitzungs-Cookie ist same-site, und nach draussen hört nur dieser
+	# Proxy. API und Oberfläche bleiben auf 127.0.0.1.
+
+	handle /api/* {
+		reverse_proxy 127.0.0.1:8781
+	}
+
+	handle {
+		reverse_proxy 127.0.0.1:8782
+	}
+
+	# --- Kopfzeilen ---------------------------------------------------------
+
+	header {
+		# HSTS: Der Browser nimmt ab jetzt nur noch HTTPS für diese Domain.
+		# Ein Jahr, weil kürzer den Schutz kaum trägt.
+		Strict-Transport-Security "max-age=31536000; includeSubDomains"
+
+		# Kein Einbetten in fremde Seiten -- gegen Clickjacking.
+		X-Frame-Options "DENY"
+		X-Content-Type-Options "nosniff"
+		Referrer-Policy "same-origin"
+
+		# Kein Zugriff auf Kamera, Mikrofon, Standort. Die App braucht
+		# nichts davon; was nicht erlaubt ist, kann kein Skript missbrauchen.
+		Permissions-Policy "camera=(), microphone=(), geolocation=(), payment=()"
+
+		# Caddy verrät sonst, was hier läuft.
+		-Server
+	}
+
+	# --- Protokoll ----------------------------------------------------------
+	#
+	# Zugriffe landen im systemd-Journal, nicht in einer Datei, die
+	# irgendwann die Platte füllt.
+
+	log {
+		output stderr
+		format console
+		# Anmeldeversuche interessieren, das Ausliefern von Bildern nicht.
+		level INFO
+	}
+}
+
+# --- Im Heimnetz, ohne Domain ------------------------------------------------
+#
+# Ohne öffentliche Domain gibt es kein Zertifikat von Let's Encrypt. Dann
+# diesen Block statt des obigen benutzen -- Caddy stellt ein eigenes
+# Zertifikat aus. Der Browser warnt einmal; auf dem iPhone lässt sich
+# Caddys Wurzelzertifikat unter Einstellungen -> Profil installieren, dann
+# ist Ruhe.
+#
+# Wichtig: Dann muss TRADEDIARY_COOKIE_SECURE=true bleiben -- die
+# Verbindung ist ja verschlüsselt. Nur bei reinem http:// gehört es auf
+# false, sonst wird das Sitzungs-Cookie nie gesetzt.
+#
+# 192.168.1.42 {
+# 	tls internal
+# 	handle /api/* {
+# 		reverse_proxy 127.0.0.1:8781
+# 	}
+# 	handle {
+# 		reverse_proxy 127.0.0.1:8782
+# 	}
+# }

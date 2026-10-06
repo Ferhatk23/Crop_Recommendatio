@@ -1,0 +1,10 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64">
+  <!-- Tinte auf Grund, kein Radius, 2px-Regeln — dieselbe Sprache wie
+       die Oberfläche. Die beiden Balken sind die Ergebnis-Regel:
+       oben Gewinn, unten Verlust. -->
+  <rect width="64" height="64" fill="#201e1d"/>
+  <rect x="10" y="14" width="44" height="4" fill="#0f6f43"/>
+  <rect x="10" y="26" width="30" height="3" fill="#f3f2f2"/>
+  <rect x="10" y="35" width="38" height="3" fill="#f3f2f2"/>
+  <rect x="10" y="46" width="22" height="4" fill="#ec3013"/>
+</svg>

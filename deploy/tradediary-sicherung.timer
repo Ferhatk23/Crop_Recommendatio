@@ -1,0 +1,18 @@
+[Unit]
+Description=TradeDiary täglich sichern
+
+[Timer]
+# Nachts um vier: nach dem Handelstag, vor dem nächsten.
+OnCalendar=*-*-* 04:00:00
+
+# Zufällige Verzögerung bis zu fünf Minuten -- damit nicht alle Dienste
+# des Rechners zur selben Sekunde losrennen.
+RandomizedDelaySec=5m
+
+# Der wichtigste Schalter: War der Rechner um vier aus, läuft die
+# Sicherung beim nächsten Start nach. Ohne das gäbe es an jedem Tag mit
+# Neustart schlicht keine.
+Persistent=true
+
+[Install]
+WantedBy=timers.target

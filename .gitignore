@@ -1,0 +1,41 @@
+__pycache__/
+*.py[cod]
+.pytest_cache/
+*.egg-info/
+.venv/
+venv/
+
+# Zugangsdaten. Gehören niemals ins Verzeichnis -- weder Kontonummer
+# noch Investor-Passwort, auch nicht "nur zum Testen".
+.env
+.env.*
+!.env.beispiel
+collector/.env
+
+# Der Datenbestand ist erzeugt, nicht gepflegt: `python scripts/seed_db.py`
+# baut ihn jederzeit neu. Eingecheckt würde er nur veralten -- und im
+# Echtbetrieb stünden hier die Handelsdaten eines echten Kontos.
+*.db
+*.db-journal
+*.db-wal
+*.db-shm
+
+# Web
+node_modules/
+.next/
+.next-build/
+
+# Von Next.js erzeugt und nicht stabil: Der Verweis darin zeigt auf das
+# Ausgabeverzeichnis des zuletzt gelaufenen Befehls -- nach `npm run dev`
+# auf .next, nach `npm run build` auf .next-build. Eingecheckt stuende
+# die Datei nach jedem Befehl als geaendert im Arbeitsverzeichnis.
+# Nachgemessen: `tsc --noEmit` laeuft auch ohne sie sauber durch, und
+# beide Befehle legen sie ohnehin neu an.
+next-env.d.ts
+out/
+*.tsbuildinfo
+.DS_Store
+
+# Bildschirmfotos aus `pruefe-oberflaeche.mjs --bilder`. Sie zeigen den
+# vollständigen Journalinhalt und gehören weder ins Git noch nach /tmp.
+.td-shots/

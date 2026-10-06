@@ -1,0 +1,9 @@
+{
+  "name": "TradeDiary",
+  "short_name": "TradeDiary",
+  "start_url": "/",
+  "display": "standalone",
+  "background_color": "#f3f2f2",
+  "theme_color": "#f3f2f2",
+  "icons": []
+}
