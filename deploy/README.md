@@ -68,20 +68,24 @@ systemctl status tradediary-web            # Zustand und letzte Zeilen
 journalctl -u tradediary-web -n 50 --no-pager
 ```
 
-**`EADDRINUSE: address already in use :::3000`** — etwas anderes hält den
-Port schon. Finden und beenden:
+**`EADDRINUSE: address already in use`** — etwas anderes hält den Port.
+`einrichten.sh` prüft das inzwischen selbst, vor dem Start der Dienste,
+und sagt mit PID und Befehlszeile, wer dort liegt. Von Hand:
 
 ```bash
-sudo ss -tlnp | grep 3000                  # wer hört dort?
+sudo ss -tlnp | grep 878                   # wer hört auf 8781/8782?
 sudo systemctl stop tradediary-web
 sudo pkill -u tradediary -f "next start"   # verwaiste Instanzen
-sudo ss -tlnp | grep 3000                  # jetzt leer?
 sudo systemctl start tradediary-web
 ```
 
-Häufigster Grund: ein von Hand gestartetes `npm run dev` oder `next start`
-aus einem früheren Versuch, das systemd nicht kennt und deshalb beim
-Neustart auch nicht beendet.
+Die Dienste liegen bewusst auf **8781** (API) und **8782** (Oberfläche),
+nicht auf 8000 und 3000. Von aussen sieht sie niemand — Caddy verteilt —,
+und 3000 ist der meistumkämpfte Port überhaupt: Auf dem ersten
+Zielrechner lag dort bereits ein anderes Programm. Wer sie ändern will,
+ändert sie an drei Stellen: in beiden `.service`-Dateien, im `Caddyfile`
+und in der Port-Prüfung von `einrichten.sh`. Ein Test hält fest, dass die
+drei zusammenpassen.
 
 Steht im Protokoll ein **Neustart-Zähler in den Tausenden**, lief der
 Dienst lange im Kreis. Das ist seit dieser Fassung nicht mehr möglich:
@@ -105,7 +109,7 @@ sudo systemctl reset-failed tradediary-web
               /api/*   │   alles andere
             ┌──────────┴──────────┐
             ▼                     ▼
-    127.0.0.1:8000        127.0.0.1:3000
+    127.0.0.1:8781        127.0.0.1:8782
       uvicorn               next start
          │
     /var/lib/tradediary/tradediary.db
@@ -128,8 +132,8 @@ Pfade im Bundle relativ (`/api/trades`), und der Proxy verteilt sie.
 
 | Dienst | Was | Wo |
 |---|---|---|
-| `tradediary-api` | uvicorn | 127.0.0.1:8000 |
-| `tradediary-web` | Next.js | 127.0.0.1:3000 |
+| `tradediary-api` | uvicorn | 127.0.0.1:8781 |
+| `tradediary-web` | Next.js | 127.0.0.1:8782 |
 | `tradediary-sicherung.timer` | tägliche Sicherung, 04:00 | — |
 | `caddy` | TLS und Verteilung | :80, :443 |
 

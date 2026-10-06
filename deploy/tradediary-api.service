@@ -30,7 +30,7 @@ EnvironmentFile=/etc/tradediary/api.env
 # --forwarded-allow-ips begrenzt das auf den Proxy: Sonst könnte jeder,
 # der die API direkt erreicht, sich per Kopfzeile als HTTPS ausgeben.
 ExecStart=/opt/tradediary/.venv/bin/uvicorn tradediary.api.main:app \
-    --host 127.0.0.1 --port 8000 \
+    --host 127.0.0.1 --port 8781 \
     --proxy-headers --forwarded-allow-ips=127.0.0.1
 
 Restart=always

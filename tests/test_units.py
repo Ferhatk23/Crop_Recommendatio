@@ -136,3 +136,77 @@ def test_nur_die_sicherung_darf_schreiben():
         unit = lies(UNITS / name)["Service"]
         pfade = unit.get("ReadWritePaths", "")
         assert "/var/lib/tradediary" in pfade or "/var/backups" in pfade, name
+
+
+# ---------------------------------------------------------------------------
+# Units und Proxy müssen sich einig sein
+# ---------------------------------------------------------------------------
+
+def _port_aus(text: str, *muster: str) -> str:
+    import re
+
+    for m in muster:
+        treffer = re.search(m, text)
+        if treffer:
+            return treffer.group(1)
+    raise AssertionError(f"kein Port gefunden in: {text[:80]}")
+
+
+def test_proxy_und_dienste_zeigen_auf_dieselben_ports():
+    """Sonst verteilt Caddy ins Leere -- und zwar lautlos.
+
+    Die Ports stehen in zwei Dateien: einmal am Befehl des Dienstes,
+    einmal im `reverse_proxy` des Proxys. Wer einen ändert und den anderen
+    vergisst, bekommt ein 502 und sucht es im Programm.
+    """
+    caddyfile = (UNITS / "Caddyfile").read_text()
+
+    api = _port_aus(
+        lies(UNITS / "tradediary-api.service")["Service"]["ExecStart"],
+        r"--port (\d+)",
+    )
+    web = _port_aus(
+        lies(UNITS / "tradediary-web.service")["Service"]["ExecStart"],
+        r"-p (\d+)", r"--port (\d+)",
+    )
+
+    assert f"reverse_proxy 127.0.0.1:{api}" in caddyfile, (
+        f"die API hört auf {api}, der Proxy zeigt woandershin"
+    )
+    assert f"reverse_proxy 127.0.0.1:{web}" in caddyfile, (
+        f"die Oberfläche hört auf {web}, der Proxy zeigt woandershin"
+    )
+
+
+def test_die_ports_sind_nicht_die_umkaempften_standardports():
+    """3000 und 8000 will jedes zweite Programm.
+
+    Von aussen sieht sie niemand -- Caddy verteilt --, es gibt also keinen
+    Grund, ausgerechnet dort zu liegen. Auf dem Zielrechner lag auf 3000
+    bereits etwas anderes, und der Dienst scheiterte an EADDRINUSE.
+    """
+    for name, muster in (
+        ("tradediary-api.service", (r"--port (\d+)",)),
+        ("tradediary-web.service", (r"-p (\d+)", r"--port (\d+)")),
+    ):
+        port = _port_aus(lies(UNITS / name)["Service"]["ExecStart"], *muster)
+        assert port not in ("3000", "8000", "8080", "5000"), (
+            f"{name} liegt auf {port} -- ein Port, den viele Programme wollen"
+        )
+
+
+def test_der_installer_prueft_genau_diese_ports():
+    """Die Vorab-Prüfung muss dieselben Ports kennen wie die Dienste.
+
+    Prüfte sie andere, liesse sie den Dienst in genau den Fehler laufen,
+    den sie abfangen soll.
+    """
+    skript = (UNITS / "einrichten.sh").read_text()
+    for name, muster in (
+        ("tradediary-api.service", (r"--port (\d+)",)),
+        ("tradediary-web.service", (r"-p (\d+)", r"--port (\d+)")),
+    ):
+        port = _port_aus(lies(UNITS / name)["Service"]["ExecStart"], *muster)
+        assert f'"{port}:' in skript, (
+            f"einrichten.sh prüft {port} nicht, obwohl {name} dort hört"
+        )

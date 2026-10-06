@@ -31,13 +31,18 @@ Environment=TD_DIST_DIR=.next-build
 # dann an 0.0.0.0 -- nachgemessen, es stand `0.0.0.0:3000` in `ss`, und
 # die Oberfläche wäre unverschlüsselt im ganzen Netz erreichbar gewesen,
 # am Proxy vorbei. Die Adresse gehört als Flag an den Befehl; damit steht
-# dort `127.0.0.1:3000`, ebenfalls nachgemessen.
+# dort die Loopback-Adresse, ebenfalls nachgemessen.
+#
+# Der Port ist bewusst nicht 3000: Von aussen sieht ihn niemand -- Caddy
+# verteilt --, und 3000 ist der meistumkaempfte Port ueberhaupt. Auf dem
+# Zielrechner lag dort bereits etwas anderes, und der Dienst scheiterte
+# an EADDRINUSE. Ein Port, den sonst niemand will, erspart diesen Abend.
 
 # Der Pfad wird beim Einrichten eingesetzt: Unter Ubuntu mit
 # `apt install nodejs` ist es /usr/bin/node, mit nvm oder einem Tarball
 # liegt node ganz woanders. Ein fest verdrahteter Pfad bricht dann mit
 # "203/EXEC" -- eine Meldung, aus der man den Grund nicht abliest.
-ExecStart=__NODE__ node_modules/.bin/next start -H 127.0.0.1 -p 3000
+ExecStart=__NODE__ node_modules/.bin/next start -H 127.0.0.1 -p 8782
 
 Restart=always
 RestartSec=5

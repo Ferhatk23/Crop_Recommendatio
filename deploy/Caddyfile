@@ -17,11 +17,11 @@ journal.example.com {
 	# Proxy. API und Oberfläche bleiben auf 127.0.0.1.
 
 	handle /api/* {
-		reverse_proxy 127.0.0.1:8000
+		reverse_proxy 127.0.0.1:8781
 	}
 
 	handle {
-		reverse_proxy 127.0.0.1:3000
+		reverse_proxy 127.0.0.1:8782
 	}
 
 	# --- Kopfzeilen ---------------------------------------------------------
@@ -72,9 +72,9 @@ journal.example.com {
 # 192.168.1.42 {
 # 	tls internal
 # 	handle /api/* {
-# 		reverse_proxy 127.0.0.1:8000
+# 		reverse_proxy 127.0.0.1:8781
 # 	}
 # 	handle {
-# 		reverse_proxy 127.0.0.1:3000
+# 		reverse_proxy 127.0.0.1:8782
 # 	}
 # }

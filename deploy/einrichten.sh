@@ -208,7 +208,7 @@ melde "Belegte Ports prüfen"
 systemctl stop tradediary-api tradediary-web 2>/dev/null || true
 sleep 1
 
-for eintrag in "3000:Oberfläche" "8000:API"; do
+for eintrag in "8782:Oberfläche" "8781:API"; do
     PORT="${eintrag%%:*}"
     WAS="${eintrag##*:}"
 
@@ -255,12 +255,12 @@ done
 # --- Probe -----------------------------------------------------------------
 
 melde "Probe"
-if curl -fsS http://127.0.0.1:8000/api/health >/dev/null; then
+if curl -fsS http://127.0.0.1:8781/api/health >/dev/null; then
     echo "    API antwortet"
 else
     echo "    API antwortet nicht"; exit 1
 fi
-if curl -fsS -o /dev/null http://127.0.0.1:3000/; then
+if curl -fsS -o /dev/null http://127.0.0.1:8782/; then
     echo "    Oberfläche antwortet"
 else
     echo "    Oberfläche antwortet nicht"; exit 1
