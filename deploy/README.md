@@ -10,37 +10,56 @@ git clone -b claude/tradezella-neues-projekt-ob2nbi \
     https://github.com/Ferhatk23/Crop_Recommendatio tradediary
 cd tradediary
 sudo apt install python3-venv nodejs npm rsync curl caddy
-sudo ./deploy/einrichten.sh
+sudo ./deploy/einrichten.sh --caddy auto --email ferhat@example.com
 ```
+
+Das war es. `--caddy auto` ermittelt die Adresse dieses Rechners im
+Heimnetz, baut daraus die Proxy-Konfiguration, lässt Caddy ein eigenes
+Zertifikat ausstellen und prüft die Konfiguration, bevor es sie lädt.
+`--email` legt dich als Nutzer an und fragt nach deinem Passwort.
+
+Hast du eine eigene Domain, dann `--caddy journal.example.com` statt
+`auto` — dann holt Caddy ein Zertifikat von Let's Encrypt. Beides ohne
+Flags lässt das Skript die Dienste einrichten und sonst nichts anfassen.
 
 Das Skript ist wiederholbar. Ein zweiter Lauf aktualisiert den Code und baut
 neu, ohne die Datenbank oder die Zugangsdaten anzufassen — genau deshalb kann
 man es zum Aktualisieren benutzen und muss es nicht vorher jedes Mal lesen.
 
-Danach:
+## Und dann: die ersten Minuten in der App
 
-```bash
-# 1. Dich selbst anlegen
-#
-#    `env TRADEDIARY_DB=…` ist Pflicht, nicht Zierde: sudo gibt die
-#    Umgebung nicht weiter. Ohne die Zeile legt das Skript den Nutzer in
-#    einer neuen, leeren Datenbank neben dem Code an, meldet „Angelegt",
-#    und die Anmeldung scheitert danach mit „E-Mail oder Passwort stimmt
-#    nicht". Heute bricht es stattdessen ab und sagt es.
-sudo -u tradediary env TRADEDIARY_DB=sqlite:////var/lib/tradediary/tradediary.db \
-     /opt/tradediary/.venv/bin/python \
-     /opt/tradediary/scripts/nutzer.py anlegen ferhat@example.com
+Die Reihenfolge ist nicht beliebig. Das Handelskonto entsteht in der
+Oberfläche, und erst wenn es da ist, lässt sich eine Marke dafür anlegen.
 
-# 2. Proxy einrichten
-sudo cp /opt/tradediary/deploy/Caddyfile /etc/caddy/Caddyfile
-sudo $EDITOR /etc/caddy/Caddyfile          # Domain eintragen
-sudo systemctl reload caddy
+1. **`https://<adresse>` öffnen** — die Adresse hat das Skript am Ende
+   ausgegeben. Beim ersten Mal warnt der Browser wegen des selbst
+   ausgestellten Zertifikats; auf dem iPhone lässt sich Caddys
+   Wurzelzertifikat einmal unter Einstellungen → Profil installieren,
+   dann ist Ruhe.
 
-# 3. Marke für den Sammler
-sudo -u tradediary env TRADEDIARY_DB=sqlite:////var/lib/tradediary/tradediary.db \
-     /opt/tradediary/.venv/bin/python \
-     /opt/tradediary/scripts/marke.py anlegen 1
-```
+2. **Anmelden** mit der E-Mail und dem Passwort von oben.
+
+3. **Handelskonto anlegen** unter ⚙ Einstellungen → „Konto hinzufügen".
+   Die Grenzwerte deiner Prop-Firma stehen in der Kontoeröffnungs-Mail.
+   Die Konsistenzregel wird als Anteil eingetragen: 40 % sind `0,4`.
+   Ohne dieses Konto bleibt das Dashboard leer — es gibt dann nichts, auf
+   das sich ein Puffer beziehen könnte.
+
+4. **Marke für den Sammler** — jetzt erst, denn sie hängt am Konto:
+
+   ```bash
+   sudo -u tradediary env TRADEDIARY_DB=sqlite:////var/lib/tradediary/tradediary.db \
+        /opt/tradediary/.venv/bin/python \
+        /opt/tradediary/scripts/marke.py anlegen 1
+   ```
+
+   Die Nummer ist die des Kontos aus Schritt 3. Stimmt sie nicht, zeigt
+   das Skript die vorhandenen Konten an. Die ausgegebene Zeile erscheint
+   **genau einmal** — sie gehört in `collector/.env`.
+
+5. **Sammler anschliessen** — MT5 unter Wine, dann `collector/README.md`.
+   Das ist der fummeligste Teil und darf warten: Das Journal läuft auch
+   ohne ihn, nur stehen dann noch keine Trades drin.
 
 ## Wie es aufgebaut ist
 
