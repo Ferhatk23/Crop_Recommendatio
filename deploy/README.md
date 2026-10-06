@@ -61,6 +61,37 @@ Oberfläche, und erst wenn es da ist, lässt sich eine Marke dafür anlegen.
    Das ist der fummeligste Teil und darf warten: Das Journal läuft auch
    ohne ihn, nur stehen dann noch keine Trades drin.
 
+## Wenn ein Dienst nicht startet
+
+```bash
+systemctl status tradediary-web            # Zustand und letzte Zeilen
+journalctl -u tradediary-web -n 50 --no-pager
+```
+
+**`EADDRINUSE: address already in use :::3000`** — etwas anderes hält den
+Port schon. Finden und beenden:
+
+```bash
+sudo ss -tlnp | grep 3000                  # wer hört dort?
+sudo systemctl stop tradediary-web
+sudo pkill -u tradediary -f "next start"   # verwaiste Instanzen
+sudo ss -tlnp | grep 3000                  # jetzt leer?
+sudo systemctl start tradediary-web
+```
+
+Häufigster Grund: ein von Hand gestartetes `npm run dev` oder `next start`
+aus einem früheren Versuch, das systemd nicht kennt und deshalb beim
+Neustart auch nicht beendet.
+
+Steht im Protokoll ein **Neustart-Zähler in den Tausenden**, lief der
+Dienst lange im Kreis. Das ist seit dieser Fassung nicht mehr möglich:
+Nach zehn Fehlschlägen in fünf Minuten bleibt er auf `failed` stehen. Den
+Zähler zurücksetzen:
+
+```bash
+sudo systemctl reset-failed tradediary-web
+```
+
 ## Wie es aufgebaut ist
 
 ```

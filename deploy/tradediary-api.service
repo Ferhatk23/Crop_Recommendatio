@@ -4,6 +4,12 @@ Documentation=https://github.com/Ferhatk23/Crop_Recommendatio
 After=network-online.target
 Wants=network-online.target
 
+# Siehe tradediary-web.service: Ohne Grenze läuft ein Dienst, der nicht
+# starten kann, für immer im Kreis statt sichtbar kaputt zu sein. Die
+# Schlüssel gehören in [Unit]; in [Service] werden sie ignoriert.
+StartLimitIntervalSec=300
+StartLimitBurst=10
+
 [Service]
 Type=exec
 User=tradediary

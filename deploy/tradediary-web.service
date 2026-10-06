@@ -4,6 +4,19 @@ Documentation=https://github.com/Ferhatk23/Crop_Recommendatio
 After=network-online.target tradediary-api.service
 Wants=network-online.target
 
+# Irgendwann aufgeben. Ohne diese beiden Zeilen versucht systemd es
+# unbegrenzt weiter: Die Voreinstellung erlaubt 5 Starts in 10 Sekunden,
+# und mit RestartSec=5 wird sie nie erreicht. Auf dem Zielrechner stand
+# der Zähler bei 211.661 Versuchen -- knapp zwei Wochen Dauerschleife, die
+# das Journal zumüllt und den eigentlichen Fehler darin begräbt. Jetzt
+# bleibt der Dienst nach zehn Fehlschlägen in fünf Minuten auf `failed`
+# stehen, wo man ihn sieht.
+#
+# In [Unit], nicht in [Service]: Dort meldet systemd "Unknown key name"
+# und ignoriert sie stillschweigend -- die Schleife liefe weiter.
+StartLimitIntervalSec=300
+StartLimitBurst=10
+
 [Service]
 Type=exec
 User=tradediary
@@ -14,15 +27,17 @@ Environment=NODE_ENV=production
 # Der gebaute Stand liegt in .next-build, nicht in .next -- damit ein Bau
 # nie das Verzeichnis überschreibt, aus dem ein laufender Dev-Server liest.
 Environment=TD_DIST_DIR=.next-build
-# Nur Loopback. Nach draussen hört ausschliesslich der Proxy.
-Environment=HOSTNAME=127.0.0.1
-Environment=PORT=3000
+# Kein HOSTNAME hier: `next start` liest die Variable nicht und bindet
+# dann an 0.0.0.0 -- nachgemessen, es stand `0.0.0.0:3000` in `ss`, und
+# die Oberfläche wäre unverschlüsselt im ganzen Netz erreichbar gewesen,
+# am Proxy vorbei. Die Adresse gehört als Flag an den Befehl; damit steht
+# dort `127.0.0.1:3000`, ebenfalls nachgemessen.
 
 # Der Pfad wird beim Einrichten eingesetzt: Unter Ubuntu mit
 # `apt install nodejs` ist es /usr/bin/node, mit nvm oder einem Tarball
 # liegt node ganz woanders. Ein fest verdrahteter Pfad bricht dann mit
 # "203/EXEC" -- eine Meldung, aus der man den Grund nicht abliest.
-ExecStart=__NODE__ node_modules/.bin/next start
+ExecStart=__NODE__ node_modules/.bin/next start -H 127.0.0.1 -p 3000
 
 Restart=always
 RestartSec=5
